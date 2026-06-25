@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+*.log
+/tmp-clones/
+web-admin/node_modules/
+web-admin/dist/
