@@ -75,7 +75,9 @@ export const skillRunner: ISkillRunner = {
     ];
     return new Promise<SkillRunOutput>((resolve) => {
       const child = spawn(cfg.claudeCliBin, args, {
-        shell: false,
+        // Windows: bin Claude là `claude.cmd` → spawn shell:false ném ENOENT. Bật shell CHỈ trên win32.
+        // An toàn: mọi arg là cố định/từ catalog đã validate (model/effort), prompt untrusted vẫn qua stdin.
+        shell: process.platform === 'win32',
         cwd: req.cwd,
         env: {
           ...process.env,
