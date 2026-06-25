@@ -1,0 +1,50 @@
+{
+  "name": "tieu-nhi",
+  "version": "0.1.0",
+  "source": "github:bvminh-dev/tieu-nhi",
+  "installedAt": "2026-06-25T06:25:57.902Z",
+  "files": [
+    ".claude/commands/tn-bao-cao.md",
+    ".claude/commands/tn-bao-mat.md",
+    ".claude/commands/tn-code.md",
+    ".claude/commands/tn-ke-hoach.md",
+    ".claude/commands/tn-khoi-tao.md",
+    ".claude/commands/tn-kiem-thu.md",
+    ".claude/commands/tn-review.md",
+    ".claude/commands/tn-thiet-ke.md",
+    ".claude/commands/tn-yeu-cau.md",
+    ".claude/skills/bao-mat-he-thong/SKILL.md",
+    ".claude/skills/bao-mat-he-thong/references/checklist-28-khia-canh.md",
+    ".claude/skills/bao-mat-he-thong/references/stride-owasp.md",
+    ".claude/skills/bao-mat-he-thong/templates/output-template.md",
+    ".claude/skills/chay-kiem-thu/SKILL.md",
+    ".claude/skills/chay-kiem-thu/templates/report-template.md",
+    ".claude/skills/khoi-tao-tai-lieu/SKILL.md",
+    ".claude/skills/khoi-tao-tai-lieu/templates/baseline-template.md",
+    ".claude/skills/kiem-thu-phan-mem/SKILL.md",
+    ".claude/skills/kiem-thu-phan-mem/references/checklist-20-khia-canh.md",
+    ".claude/skills/kiem-thu-phan-mem/references/istqb-techniques.md",
+    ".claude/skills/kiem-thu-phan-mem/templates/output-template.md",
+    ".claude/skills/phan-tich-nghiep-vu/SKILL.md",
+    ".claude/skills/phan-tich-nghiep-vu/references/babok-techniques.md",
+    ".claude/skills/phan-tich-nghiep-vu/references/checklist-16-khia-canh.md",
+    ".claude/skills/phan-tich-nghiep-vu/templates/output-template.md",
+    ".claude/skills/review-code/SKILL.md",
+    ".claude/skills/review-code/references/checklist-28-khia-canh.md",
+    ".claude/skills/review-code/references/solid-cleancode-patterns.md",
+    ".claude/skills/review-code/templates/output-template.md",
+    ".claude/skills/thiet-ke-he-thong/SKILL.md",
+    ".claude/skills/thiet-ke-he-thong/references/checklist-28-khia-canh.md",
+    ".claude/skills/thiet-ke-he-thong/references/togaf-ddd-patterns.md",
+    ".claude/skills/thiet-ke-he-thong/templates/output-template.md",
+    "CLAUDE.md"
+  ],
+  "history": [
+    {
+      "version": "0.1.0",
+      "source": "github:bvminh-dev/tieu-nhi",
+      "installedAt": "2026-06-25T06:25:57.902Z",
+      "fileCount": 34
+    }
+  ]
+}
