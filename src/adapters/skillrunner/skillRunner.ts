@@ -38,12 +38,48 @@ function buildPrompt(req: SkillRunRequest): string {
   ].join('\n');
 }
 
-/** Parse output CLI: ưu tiên JSON block; fallback đếm theo nhãn severity trong markdown. */
+/**
+ * Tìm các object JSON cân bằng ngoặc trong text (scan thủ công, tôn trọng string/escape).
+ * Thay cho regex tham lam `{[\s\S]*}` (dính cả prose/đoạn `{...}` khác → JSON.parse hỏng).
+ * Trả về danh sách chuỗi JSON ứng viên, theo thứ tự xuất hiện.
+ */
+function extractJsonObjects(raw: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] !== '{') continue;
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let j = i; j < raw.length; j++) {
+      const ch = raw[j];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) {
+          out.push(raw.slice(i, j + 1));
+          i = j; // nhảy qua object đã bắt, tránh quét lồng dư thừa
+          break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** Parse output CLI: ưu tiên JSON block (cân bằng ngoặc); fallback đếm theo nhãn severity trong markdown. */
 export function parseSkillOutput(skill: string, raw: string): { findings: Finding[]; costTokens?: number } {
-  const jsonMatch = raw.match(/\{[\s\S]*"findings"[\s\S]*\}/);
-  if (jsonMatch) {
+  // Lấy object JSON đầu tiên có khoá "findings" — bỏ qua các object phụ (vd code mẫu trong field "fix").
+  const candidate = extractJsonObjects(raw).find((s) => s.includes('"findings"'));
+  if (candidate) {
     try {
-      const parsed = JSON.parse(jsonMatch[0]) as {
+      const parsed = JSON.parse(candidate) as {
         findings?: {
           severity?: string;
           file?: string;
@@ -70,8 +106,13 @@ export function parseSkillOutput(skill: string, raw: string): { findings: Findin
           fix: f.fix,
         }));
       return { findings, costTokens: parsed.costTokens };
-    } catch {
-      logger.warn('skill_output_json_parse_failed', { skill });
+    } catch (e) {
+      // Có khoá "findings" nhưng JSON vẫn hỏng (vd model chèn chú thích/`,` thừa) → log snippet đã redact để debug.
+      logger.warn('skill_output_json_parse_failed', {
+        skill,
+        error: (e as Error).message,
+        snippet: redactString(candidate.slice(0, 300)),
+      });
     }
   }
   // Fallback: gom nhãn [CRITICAL]/[HIGH]... thành finding thô.

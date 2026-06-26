@@ -82,6 +82,17 @@ test('UT-25 parseSkillOutput đọc JSON block → đếm severity đúng', () =
   assert.equal(c.CRITICAL, 1);
   assert.equal(c.LOW, 1);
 });
+test('UT-25 parseSkillOutput bỏ qua object JSON phụ, bắt đúng block có "findings"', () => {
+  // prose chứa 1 object {...} không liên quan + JSON thật có field "fix" chứa code mẫu `{...}`.
+  const raw =
+    'Ví dụ cấu hình {"foo":1}.\n' +
+    '```json\n{"findings":[{"severity":"HIGH","title":"x","fix":"dùng `{ a: 1 }`"}],"costTokens":7}\n```\n' +
+    'kết thúc.';
+  const out = parseSkillOutput('review-code', raw);
+  assert.equal(out.findings.length, 1);
+  assert.equal(out.findings[0].severity, 'HIGH');
+  assert.equal(out.costTokens, 7);
+});
 test('UT-25 parseSkillOutput fallback nhãn [SEVERITY] khi không có JSON', () => {
   const raw = '[CRITICAL] lỗi nghiêm trọng\nvài dòng\n[HIGH] cảnh báo';
   const out = parseSkillOutput('review-code', raw);
