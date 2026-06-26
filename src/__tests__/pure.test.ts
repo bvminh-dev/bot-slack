@@ -22,6 +22,7 @@ import { RateLimiter } from '../application/rateLimiter';
 import { normalizeModelConfig } from '../config/catalog';
 import { makeIdempotencyKey, severityCounts } from '../domain/reviewJob';
 import { redact } from '../observability/redact';
+import { chunkByLines } from '../adapters/slack/slackPort';
 import { createHmac } from 'node:crypto';
 
 const VALID_PR = 'https://dev.azure.com/org/proj/_git/repo/pullrequest/123';
@@ -37,6 +38,23 @@ test('TC-01 parse lệnh hợp lệ', () => {
 // --- TC-02 thiếu pr-url ---
 test('TC-02 thiếu link PR → ném lỗi', () => {
   assert.throws(() => parseCommand('@tieu-nhi LMS review'));
+});
+
+// --- chunkByLines: thay files.upload đã deprecated ---
+test('chunkByLines giữ ranh giới dòng, không mảnh nào vượt max, ghép lại nguyên văn', () => {
+  const text = Array.from({ length: 50 }, (_, i) => `- dòng số ${i} với chút nội dung`).join('\n');
+  const chunks = chunkByLines(text, 80);
+  assert.ok(chunks.length > 1, 'phải chia nhiều mảnh');
+  for (const c of chunks) assert.ok(c.length <= 80, `mảnh vượt max: ${c.length}`);
+  assert.equal(chunks.join('\n'), text, 'ghép lại phải bằng bản gốc');
+});
+
+test('chunkByLines cắt cứng dòng đơn dài hơn max', () => {
+  const long = 'x'.repeat(250);
+  const chunks = chunkByLines(long, 100);
+  assert.equal(chunks.length, 3);
+  for (const c of chunks) assert.ok(c.length <= 100);
+  assert.equal(chunks.join(''), long);
 });
 
 // --- TC-04 link bị Slack bọc <...> + query ---

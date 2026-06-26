@@ -235,8 +235,8 @@ export const azureClient: IAzureClient = {
     ];
     const { code, stderr } = await runGit(args, { timeoutMs: cfg.skillRunTimeoutMs });
     if (code !== 0) {
-      logger.warn('git_clone_failed', { repoUrl, branch }); // stderr có thể chứa nhạy cảm → không log raw
-      void stderr;
+      // stderr đã đi qua redact() ở logger (che token/PAT); cắt đuôi để chẩn đoán (vd "branch not found").
+      logger.warn('git_clone_failed', { repoUrl, branch, exitCode: code, stderr: stderr.slice(-2000) });
       return { cloned: false }; // worker fallback review trên diff
     }
     return { cloned: true };

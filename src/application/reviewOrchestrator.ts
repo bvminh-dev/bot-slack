@@ -18,6 +18,16 @@ import { IntegrationError } from '../domain/errors';
 import { loadConfig } from '../config/env';
 
 const SEV_ORDER: Severity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+const SEV_EMOJI: Record<Severity, string> = { CRITICAL: '🔴', HIGH: '🟠', MEDIUM: '🟡', LOW: '⚪' };
+
+/** Chuẩn hoá text về Slack mrkdwn: gộp xuống dòng, đổi **đậm**→*đậm*, bỏ heading markdown (#). */
+function toSlackText(s: string): string {
+  return s
+    .replace(/\s*\n\s*/g, ' ')
+    .replace(/\*\*(.+?)\*\*/g, '*$1*')
+    .replace(/(^|\s)#{1,6}\s+/g, '$1')
+    .trim();
+}
 
 export class ReviewOrchestrator {
   private readonly ctxBuilder: ContextBuilder;
@@ -116,7 +126,7 @@ export class ReviewOrchestrator {
           findingCount: out.findings.length,
           costTokens: out.costTokens,
         });
-        if (out.status === 'failed') logger.warn('skill_failed', { skill, correlationId });
+        if (out.status === 'failed') logger.warn('skill_failed', { skill, correlationId, error: out.error });
       }
 
       // Lưu HISTORY TRƯỚC khi post Slack (ADR-010) — post fail không mất kết quả.
@@ -202,22 +212,46 @@ export class ReviewOrchestrator {
     costTokens: number,
   ): Promise<void> {
     const counts = severityCounts(findings);
+    // Nếu MỌI skill đều lỗi → không có review thực sự: báo cảnh báo, KHÔNG báo "✅ hoàn tất"
+    // (tránh user hiểu nhầm PR sạch khi thực chất key sai/lỗi hạ tầng). Hiển thị lý do để khắc phục.
+    const failedRuns = skillRuns.filter((s) => s.status === 'failed');
+    const allFailed = skillRuns.length > 0 && failedRuns.length === skillRuns.length;
+    const errReasons = [...new Set(failedRuns.map((s) => s.error).filter((e): e is string => !!e))];
     const summary = [
-      `✅ Review PR #${job.prId} hoàn tất (commit \`${job.commitHash.slice(0, 8)}\`)`,
+      allFailed
+        ? `⚠️ Review PR #${job.prId} KHÔNG hoàn tất — tất cả skill đều lỗi (commit \`${job.commitHash.slice(0, 8)}\`)`
+        : `✅ Review PR #${job.prId} hoàn tất (commit \`${job.commitHash.slice(0, 8)}\`)`,
       `Mức độ: 🔴 ${counts.CRITICAL} CRITICAL · 🟠 ${counts.HIGH} HIGH · 🟡 ${counts.MEDIUM} MEDIUM · ⚪ ${counts.LOW} LOW`,
       `Skill chạy: ${skillRuns.map((s) => `${s.skill}${s.status === 'failed' ? '(lỗi)' : ''}`).join(', ') || 'không có'}`,
+      ...(errReasons.length ? [`Lý do lỗi: ${errReasons.join(' | ')}`] : []),
       ...(notes.length ? [`Ghi chú: ${notes.join(' ')}`] : []),
       `Token ước tính: ${costTokens}`,
       `PR: ${job.prUrl}`,
     ].join('\n');
 
+    // Render Slack mrkdwn: heading *đậm* + emoji (Slack KHÔNG hỗ trợ ###), mỗi finding có
+    // tiêu đề đậm + 4 dòng blockquote (Tại sao/Bằng chứng/Tác động/Đề xuất). Fallback `detail` nếu thiếu.
     const detail = SEV_ORDER.flatMap((sev) => {
       const items = findings.filter((f) => f.severity === sev);
       if (!items.length) return [];
-      return [
-        `\n### ${sev} (${items.length})`,
-        ...items.map((f) => `- [${f.skill}]${f.file ? ` \`${f.file}\`` : ''}: ${f.title}`),
-      ];
+      const lines = [`\n${SEV_EMOJI[sev]} *${sev} (${items.length})*`];
+      items.forEach((f, i) => {
+        const meta = `_[${f.skill}${f.file ? ` · \`${f.file}\`` : ''}]_`;
+        lines.push(`\n*${i + 1}. ${toSlackText(f.title)}*  ${meta}`);
+        const rows: Array<[string, string | undefined]> = [
+          ['Tại sao', f.why],
+          ['Bằng chứng', f.evidence],
+          ['Tác động', f.impact],
+          ['Đề xuất', f.fix],
+        ];
+        const present = rows.filter(([, v]) => v && v.trim());
+        if (present.length) {
+          for (const [label, v] of present) lines.push(`> *${label}:* ${toSlackText(v as string)}`);
+        } else if (f.detail) {
+          lines.push(`> ${toSlackText(f.detail)}`);
+        }
+      });
+      return lines;
     }).join('\n');
 
     await this.slack.postResult({
@@ -227,7 +261,11 @@ export class ReviewOrchestrator {
       attachmentText: detail || undefined,
     });
     await this.slack
-      .react({ channel: job.slackChannel, timestamp: job.slackThreadTs, emoji: 'white_check_mark' })
+      .react({
+        channel: job.slackChannel,
+        timestamp: job.slackThreadTs,
+        emoji: allFailed ? 'warning' : 'white_check_mark',
+      })
       .catch(() => undefined);
   }
 }

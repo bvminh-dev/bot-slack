@@ -15,7 +15,11 @@ export interface Finding {
   file?: string;
   severity: Severity;
   title: string;
-  detail?: string;
+  detail?: string; // fallback: mô tả tự do khi skill không trả 4 trường có cấu trúc
+  why?: string; // tại sao là bug/rủi ro
+  evidence?: string; // trích dòng/đoạn cụ thể trong file
+  impact?: string; // hậu quả nếu không sửa
+  fix?: string; // đề xuất sửa cụ thể
 }
 
 export interface SkillRunResult {
