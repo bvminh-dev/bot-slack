@@ -20,7 +20,14 @@ export class IdentityService {
   /** Đăng nhập: verify PAT với Azure, cấp JWT ngắn hạn. KHÔNG lưu PAT login. */
   async login(pat: string): Promise<{ token: string; owner: SessionClaims }> {
     if (!pat || pat.trim() === '') throw new AuthError('Thiếu PAT.');
-    const identity = await this.azure.verifyPatIdentity(pat.trim()); // ném ValidationError nếu sai
+    // F-1/BUG-07: credential sai/hết hạn phải là 401, không phải 400. verifyPatIdentity ném
+    // ValidationError (→400) khi PAT sai → dịch sang AuthError (→401), message chung không lộ chi tiết.
+    let identity: { userId: string; email: string; displayName: string };
+    try {
+      identity = await this.azure.verifyPatIdentity(pat.trim());
+    } catch {
+      throw new AuthError('PAT không hợp lệ hoặc đã hết hạn.');
+    }
     const cfg = loadConfig();
     const claims: SessionClaims = {
       ownerId: identity.userId,

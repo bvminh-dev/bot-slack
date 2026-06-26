@@ -4,7 +4,7 @@ feature: review-pr-slack-azure
 stage: bugfix
 status: draft
 open_questions: 0
-updated: 2026-06-25
+updated: 2026-06-26
 ---
 
 # Bugfix — Phát hiện từ /tn-review (review-code, 28 khía cạnh)
@@ -52,13 +52,30 @@ updated: 2026-06-25
 - **Cách sửa:** Tìm khối JSON cuối/đúng (vd lấy từ dòng có `"findings"` ngược về `{` gần nhất) hoặc yêu cầu CLI bọc kết quả trong delimiter cố định.
 - **Phòng ngừa:** Parse output máy nên dựa delimiter rõ ràng, tránh regex tham lam.
 
+# Bugfix — đợt 2 (/tn-review lần 3, 2026-06-26, sau khi dựng auto-test 3 tầng)
+
+## BUG-07 `[LOW]` (F-1) login PAT sai trả HTTP 400 thay vì 401
+- **path:** [src/application/identityService.ts:23](../../../src/application/identityService.ts) (`login`) + [src/api/middleware.ts:64](../../../src/api/middleware.ts) (errorHandler `ValidationError → 400`)
+- **Triệu chứng:** `POST /api/v1/auth/login` với PAT sai/hết hạn trả **400 Bad Request**; thiết kế TC-10/FT-06/Permission Matrix quy ước **401 Unauthorized**. Phát hiện khi viết functional test FT-06 (expected 401, actual 400).
+- **Root cause:** `login()` để lọt `ValidationError` từ `azure.verifyPatIdentity` ra ngoài; `errorHandler` map `ValidationError → 400`. Credential sai bị phân loại nhầm là "request không hợp lệ" thay vì "chưa xác thực". Khía cạnh #19 Authentication / #11 API (error handling).
+- **Cách sửa (khu trú):** Trong `login()`, bọc lời gọi `verifyPatIdentity` bằng try/catch; lỗi xác thực PAT → ném `AuthError` (→401), message chung không lộ chi tiết. KHÔNG đổi kiểu lỗi gốc của `verifyPatIdentity` (vì `testConnection` bắt lỗi generic, không phụ thuộc kiểu) → không ảnh hưởng `registryService.testConnection`. Không breaking UI (api.ts chỉ đọc `error` message, không rẽ theo status).
+- **Phòng ngừa:** Lỗi credential (login/PAT/token sai-hết hạn) phải map về 401, KHÔNG để rơi vào 400 (ValidationError) — service login phải dịch lỗi xác thực hệ ngoài sang `AuthError`.
+
+## BUG-08 `[MEDIUM]` Không ghi audit cho login THẤT BẠI (mù trước brute-force PAT)
+- **path:** [src/application/identityService.ts:31](../../../src/application/identityService.ts) (`login` chỉ append audit khi thành công)
+- **Triệu chứng:** Chỉ login thành công được `auditRepository.append('login')`. Login thất bại (PAT sai/hết hạn) không để lại vết → security monitoring (FRD Audit HIGH) không phát hiện được dò/brute-force PAT.
+- **Root cause:** Audit đặt sau `verifyPatIdentity` thành công; nhánh lỗi không audit.
+- **Cách sửa (đề xuất):** Append audit `action: 'login.failed'` (KHÔNG log PAT) ở nhánh lỗi trước khi ném `AuthError`. Cần khoá audit không định danh ownerId (chưa biết owner) → ghi theo IP/thời điểm.
+- **Trạng thái:** **GHI NHẬN — chưa sửa trong đợt này.** Thuộc nhóm "audit/anomaly detection" còn là khoảng trống trong test.md & FRD (#token anomaly). Đề xuất gom vào 1 integration audit riêng để định nghĩa schema audit-fail + ngưỡng anomaly cùng lúc.
+
 # Tóm tắt mức độ
 - HIGH: BUG-01, BUG-02 (đốt token / mất khả năng retry).
-- MEDIUM: BUG-03 (trùng side-effect), BUG-04 (resolve nhầm repo), BUG-05 (lineage).
-- LOW: BUG-06.
+- MEDIUM: BUG-03 (trùng side-effect), BUG-04 (resolve nhầm repo), BUG-05 (lineage), **BUG-08 (audit login-fail)**.
+- LOW: BUG-06 (parser), **BUG-07/F-1 (401 vs 400)**.
 - KHÔNG phát hiện: CRITICAL (transaction boundary, cross-tenant leak — tenant isolation ép `ownerId` ở repository đã đúng; secret write-only/redaction đúng).
 
 # Trạng thái sửa
-- Sửa trong lần review này: BUG-01, BUG-02, BUG-03, BUG-04, BUG-05 (code).
-- BUG-06: hạ ưu tiên — ghi nhận, sửa kèm khi tối ưu parser.
+- Đợt 1 (review lần 2): sửa BUG-01, BUG-02, BUG-03, BUG-04, BUG-05 (code).
+- Đợt 2 (review lần 3): **sửa BUG-07/F-1** (code + cập nhật assertion FT-06 về 401).
+- Hạ ưu tiên/ghi nhận: BUG-06 (sửa kèm khi tối ưu parser), **BUG-08 (gom vào integration audit riêng)**.
 </content>

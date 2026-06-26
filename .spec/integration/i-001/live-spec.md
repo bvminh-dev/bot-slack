@@ -118,3 +118,10 @@
 - Quyết định/giả định: đặt assertion ở tầng rẻ nhất (parse/normalize/biên/map file→skill/phân loại lỗi → Unit; handler/Admin API/DB-queue/integration stub/concurrency → Functional; UI Admin + happy path Slack đầu-cuối → E2E). Khử trùng lặp giữa tầng (biên ở Unit, hiệu lực end-to-end ở Functional).
 - Lệch so với plan/spec: không. Không phát sinh open question (mọi yêu cầu FRD có ≥1 tầng phủ).
 - Kết quả: pyramid khỏe mạnh (54%/34%/12%), không "ice-cream cone". Khoảng trống: #9 trùng tên project (MEDIUM), audit-log schema (MEDIUM), anomaly cost/dò-id (MEDIUM), token tối đa/PR (MEDIUM), help/status/cancel + retention (LOW) — không chặn.
+
+## [2026-06-26] /tn-review (i-001) — đợt 2 (sau khi dựng auto-test 3 tầng)
+- Skill dùng: `review-code` (tập trung luồng Admin auth/identity).
+- Việc đã làm: review F-1 phát hiện khi viết functional test. Ghi BUG-07 (F-1, LOW) + BUG-08 (audit login-fail, MEDIUM) vào bugfix.md; thêm rule CLAUDE.md (lỗi credential → 401, không 400).
+- Quyết định: **sửa BUG-07** (login dịch lỗi verifyPatIdentity → AuthError/401, khu trú trong identityService.login, không ảnh hưởng testConnection); cập nhật assertion FT-06 về đúng 401. **BUG-08 ghi nhận — chưa sửa** (gom vào integration audit riêng để định nghĩa schema audit-fail + ngưỡng anomaly).
+- Lệch so với spec: không. Không phát hiện CRITICAL/HIGH mới.
+- Kết quả test sau sửa: xem /tn-bao-cao refresh. review = done.

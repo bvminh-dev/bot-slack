@@ -50,3 +50,6 @@
 ## [2026-06-26] /tn-sinh-test (i-001) — review-pr-slack-azure (phân tầng test)
 - Phân tầng `test.md` thành Test Pyramid: Unit 30 / Functional 19 / E2E 7 (56 case) + ma trận truy vết. Cascade vào `main/feature/review-pr-slack-azure/test.md`. Pyramid khỏe mạnh (54/34/12%).
 - Khoảng trống không-chặn: #9 trùng tên project, audit-log schema, anomaly cost/dò-id, token tối đa/PR (MEDIUM); help/status/cancel + retention (LOW). Bước kế: /tn-ke-hoach i-001.
+
+## [2026-06-26] /tn-review (i-001) lần 2 — review-pr-slack-azure
+- Dựng auto-test 3 tầng (Unit 44 / Functional 15 supertest+mongodb-memory-server / E2E 6 Playwright). Phát hiện F-1: login PAT sai trả 400 thay vì 401 → sửa BUG-07 (map AuthError/401). BUG-08 (audit login-fail) ghi nhận chưa sửa. Rule mới vào CLAUDE.md. review = done.
