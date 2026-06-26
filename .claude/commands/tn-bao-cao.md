@@ -19,10 +19,15 @@ Integration: **$ARGUMENTS**. Nếu rỗng → đọc `.spec/integration/registry
   1) phát hiện test runner của dự án (package.json/Makefile/pytest...) và chạy **unit + functional**;
   2) thực thi **e2e** theo các case mô tả-bằng-lời trong `test.md`, định vị bằng `data-testid` (qua built-in `/run`·`/verify` hoặc đánh giá thủ công) — **không sinh code Playwright**;
   3) so sánh **expected vs actual**, gắn defect theo mức rủi ro.
-- **Trung thực:** chưa chạy được → đánh `BLOCKED` + lý do, KHÔNG báo `PASS` giả.
+- **Runner chuẩn của dự án này (BẮT BUỘC chạy):** `npm run report:all`
+  - Chạy **3 tầng một lượt**: Unit + Functional (`node:test`, có `mongodb-memory-server`) và **E2E** (Playwright + mock `/api/v1/*`, đã quay video).
+  - Sinh **report hợp nhất `reports/all.html`** (xunit-viewer) + JUnit XML (`reports/backend-junit.xml`, `web-admin/reports/e2e-junit.xml`); E2E HTML+video xem qua `cd web-admin && npx playwright show-report`.
+  - Lệnh con khi cần khoanh vùng: `npm run test:unit` · `npm run test:func` · `npm run test:e2e` · `npm run test:report` (chỉ backend HTML).
+  - Đọc kết quả pass/fail từ stdout + `reports/all.html` để đối chiếu expected vs actual.
+- **Trung thực:** chưa chạy được (thiếu mongod binary offline / credential / browser) → đánh `BLOCKED` + lý do, KHÔNG báo `PASS` giả. Functional tự `skip` nếu MongoMemoryServer không lên.
 
 ## 3. Ghi `report.md` + cascade
-- Ghi `.spec/integration/i-NNN/report.md` theo `templates/report-template.md` của skill `chay-kiem-thu` (frontmatter `stage: report`).
+- Ghi `.spec/integration/i-NNN/report.md` theo `templates/report-template.md` của skill `chay-kiem-thu` (frontmatter `stage: report`). **Ghi rõ lệnh đã chạy (`npm run report:all`) + đường dẫn artifact `reports/all.html`** vào mục Môi Trường & Runner.
 - Nếu phát hiện locator thực tế khác `test.md` → ghi mục back-prop và **cập nhật ngược** `test.md` (+ cascade) như CONVENTION mục 7.
 - Cascade (MERGE, mục 5): `report.md` → `.spec/main/feature/<slug>/report.md`.
 - Append `live-spec.md` (i-NNN/ và .spec/main/): số PASS/FAIL/BLOCKED, defect chính. Cập nhật `registry.md` ô `report`.

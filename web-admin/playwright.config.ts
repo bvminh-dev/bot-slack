@@ -6,7 +6,12 @@ export default defineConfig({
   testDir: './e2e',
   timeout: 30_000,
   fullyParallel: true,
-  reporter: [['list']],
+  reporter: [
+    ['list'],
+    ['html', { outputFolder: 'playwright-report', open: 'never' }],
+    ['junit', { outputFile: 'reports/e2e-junit.xml' }],
+    ['json', { outputFile: 'reports/e2e.json' }], // kèm đường dẫn video/attachment theo từng test
+  ],
   use: {
     baseURL: 'http://localhost:5173',
     trace: 'on-first-retry',

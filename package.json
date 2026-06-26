@@ -12,6 +12,8 @@
     "test": "npm run build && node --test dist/__tests__",
     "test:unit": "npm run build && node --test dist/__tests__/pure.test.js dist/__tests__/context.test.js dist/__tests__/unit-extra.test.js",
     "test:func": "npm run build && node --test dist/__tests__/functional.test.js",
+    "test:report": "npm run build && node scripts/gen-report.cjs",
+    "report:all": "npm run build && node scripts/gen-report-all.cjs",
     "test:e2e": "npm --prefix web-admin run test:e2e"
   },
   "dependencies": {
@@ -29,6 +31,7 @@
     "mongodb-memory-server": "^11.2.0",
     "supertest": "^7.2.2",
     "ts-node": "^10.9.2",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "xunit-viewer": "^10.6.1"
   }
 }
