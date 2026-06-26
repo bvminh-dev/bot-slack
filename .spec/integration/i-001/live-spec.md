@@ -111,3 +111,10 @@
 - Tổng: 35 PASS / 0 FAIL / 27 BLOCKED. Defect mới: 0. 5 bug review đã sửa + tái kiểm (build/logic).
 - BLOCKED vẫn do thiếu MongoDB + credential + app trên trình duyệt (gồm test end-to-end của bugfix: dead-letter/requeue/reclaim).
 - Kết luận: NO-GO release tới khi chạy thật nhóm rủi ro cao. Back-prop locator: không lệch.
+
+## [2026-06-26] /tn-sinh-test (i-001) — phân tầng Test Pyramid
+- Skill dùng: `sinh-test-cases`.
+- Việc đã làm: phân rã `test.md` thành 3 tầng — **Unit 30 / Functional 19 / E2E 7** (tổng 56 case) + ma trận truy vết về FRD/Business Rule + TC gốc, append vào `test.md` (giữ `stage: test`).
+- Quyết định/giả định: đặt assertion ở tầng rẻ nhất (parse/normalize/biên/map file→skill/phân loại lỗi → Unit; handler/Admin API/DB-queue/integration stub/concurrency → Functional; UI Admin + happy path Slack đầu-cuối → E2E). Khử trùng lặp giữa tầng (biên ở Unit, hiệu lực end-to-end ở Functional).
+- Lệch so với plan/spec: không. Không phát sinh open question (mọi yêu cầu FRD có ≥1 tầng phủ).
+- Kết quả: pyramid khỏe mạnh (54%/34%/12%), không "ice-cream cone". Khoảng trống: #9 trùng tên project (MEDIUM), audit-log schema (MEDIUM), anomaly cost/dò-id (MEDIUM), token tối đa/PR (MEDIUM), help/status/cancel + retention (LOW) — không chặn.

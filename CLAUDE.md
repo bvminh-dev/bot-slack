@@ -18,13 +18,32 @@ Dự án theo quy trình **tài liệu là tài sản chính, code là bước c
 | 1 | `/tn-yeu-cau` | `phan-tich-nghiep-vu` | `frd.md` (hỏi làm rõ trước khi chốt) |
 | 2 | `/tn-thiet-ke` | `thiet-ke-he-thong` | `tech.md` → `sad.md` |
 | 3 | `/tn-bao-mat` | `bao-mat-he-thong` | `security.md` |
-| 4 | `/tn-kiem-thu` | `kiem-thu-phan-mem` | `test.md` (+ bảng E2E Locators, mô tả bằng lời) |
+| 4 | `/tn-kiem-thu` | `kiem-thu-phan-mem` | `test.md` (test design: condition/scenario/case + E2E Locators, mô tả bằng lời) |
+| 4b | `/tn-sinh-test` | `sinh-test-cases` | phân tầng **Unit/Functional/E2E** + ma trận truy vết (append vào `test.md`) |
 | 5 | `/tn-ke-hoach` | (tổng hợp) | `plan.md` (task + phụ thuộc + tiêu chí Done) |
 | 6 | `/tn-code` | (hiện thực) | code + back-prop locator |
 | 7 | `/tn-bao-cao` | `chay-kiem-thu` | `report.md` (chạy thật, expected vs actual) |
 | 8 | `/tn-review` | `review-code` | review; bug → `bugfix.md` + rule (mục dưới) → sửa sau |
 
-Test case mô tả **bằng lời** (Bước/Dữ liệu vào/Kết quả mong đợi); e2e dùng `data-testid`, **không sinh code Playwright/Cypress**.
+Test case mô tả **bằng lời** (Bước/Dữ liệu vào/Kết quả mong đợi); e2e dùng `data-testid`, **không sinh code Playwright/Cypress**. Bước 4 thiết kế test (condition/scenario/case + Locators); bước 4b phân rã thành **3 tầng test pyramid** (Unit nhiều → Functional vừa → E2E ít) kèm ma trận truy vết về FRD.
+
+## Quy trình khi có 1 tính năng mới (các step + thứ tự ràng buộc)
+
+Mỗi tính năng/thay đổi mới = **1 integration `i-NNN`** (xin số kế tiếp trong `registry.md`). Chạy **tuần tự** các lệnh, **không nhảy bước**:
+
+```
+(0 brownfield) tn-khoi-tao
+   → 1 tn-yeu-cau (frd) → 2 tn-thiet-ke (tech) → 3 tn-bao-mat (security)
+   → 4 tn-kiem-thu (test design) → 4b tn-sinh-test (phân tầng U/F/E2E)
+   → 5 tn-ke-hoach (plan) → 6 tn-code → 7 tn-bao-cao (report) → 8 tn-review
+```
+
+**Ràng buộc (gate cứng — định nghĩa ở `CONVENTION.md` mục 4):**
+- **Trước mỗi bước, đọc doc của bước NGAY TRƯỚC trong cùng `i-NNN`.** Nếu doc upstream `status != approved` **hoặc** `open_questions > 0` → **DỪNG**, không tự đi tiếp (hỏi người dùng hoặc chốt giả định tường minh rồi mới chạy).
+- **Thứ tự bắt buộc:** `frd → tech → security → test → (test phân tầng) → plan → code → report → review`. Mỗi bước phụ thuộc đầu ra bước trước; không có frd thì không thiết kế, không có test thì không phân tầng, không có plan thì không code.
+- **4b phụ thuộc 4:** `/tn-sinh-test` chỉ chạy khi `test.md` đã `approved` (vì nó phân rã chính test.md). Phân tầng nằm cùng `stage: test`, append vào `test.md`, **không tạo stage mới**.
+- **GATE CỨNG `/tn-code`:** chặn nếu **bất kỳ** doc nào trong `{frd, tech, security, test, plan}` của `i-NNN` chưa `approved` hoặc còn `open_questions > 0`. → **KHÔNG code khi còn open question.**
+- **Bất biến & cascade:** doc trong `i-NNN` là delta, **bất biến sau khi approved**; mọi thay đổi tri thức hợp nhất chỉ sửa ở `.spec/main/` qua cascade (MERGE, mục 5). Mỗi bước cập nhật `registry.md` + append `live-spec.md`.
 
 ## Rules / Bài học kinh nghiệm
 

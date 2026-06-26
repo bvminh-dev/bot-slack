@@ -46,3 +46,7 @@
 
 ## [2026-06-25] /tn-bao-cao (i-001) lần 2 — review-pr-slack-azure
 - Sau bugfix: 26 unit PASS / 0 FAIL (thêm TC-18 + retryable), build EXIT 0. 35 PASS / 0 FAIL / 27 BLOCKED. NO-GO tới khi có MongoDB + credential để test IDOR/concurrency/tích hợp + bugfix end-to-end.
+
+## [2026-06-26] /tn-sinh-test (i-001) — review-pr-slack-azure (phân tầng test)
+- Phân tầng `test.md` thành Test Pyramid: Unit 30 / Functional 19 / E2E 7 (56 case) + ma trận truy vết. Cascade vào `main/feature/review-pr-slack-azure/test.md`. Pyramid khỏe mạnh (54/34/12%).
+- Khoảng trống không-chặn: #9 trùng tên project, audit-log schema, anomaly cost/dò-id, token tối đa/PR (MEDIUM); help/status/cancel + retention (LOW). Bước kế: /tn-ke-hoach i-001.
