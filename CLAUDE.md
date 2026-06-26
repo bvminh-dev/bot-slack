@@ -12,18 +12,18 @@ Dự án theo quy trình **tài liệu là tài sản chính, code là bước c
 
 **Pipeline (lệnh từng bước, prefix `tn-`):**
 
-| Bước | Lệnh | Skill | Đầu ra |
-|------|------|-------|--------|
-| 0 (brownfield) | `/tn-khoi-tao` | `khoi-tao-tai-lieu` | `.spec/main/` as-built + baseline i-000 |
-| 1 | `/tn-yeu-cau` | `phan-tich-nghiep-vu` | `frd.md` (hỏi làm rõ trước khi chốt) |
-| 2 | `/tn-thiet-ke` | `thiet-ke-he-thong` | `tech.md` → `sad.md` |
-| 3 | `/tn-bao-mat` | `bao-mat-he-thong` | `security.md` |
-| 4 | `/tn-kiem-thu` | `kiem-thu-phan-mem` | `test.md` (test design: condition/scenario/case + E2E Locators, mô tả bằng lời) |
-| 4b | `/tn-sinh-test` | `sinh-test-cases` | phân tầng **Unit/Functional/E2E** + ma trận truy vết (append vào `test.md`) |
-| 5 | `/tn-ke-hoach` | (tổng hợp) | `plan.md` (task + phụ thuộc + tiêu chí Done) |
-| 6 | `/tn-code` | (hiện thực) | code + back-prop locator |
-| 7 | `/tn-bao-cao` | `chay-kiem-thu` | `report.md` (chạy thật, expected vs actual) |
-| 8 | `/tn-review` | `review-code` | review; bug → `bugfix.md` + rule (mục dưới) → sửa sau |
+| Bước | Lệnh | Skill | Đầu ra | Giải thích |
+|------|------|-------|--------|------------|
+| 0 (brownfield) | `/tn-khoi-tao` | `khoi-tao-tai-lieu` | `.spec/main/` as-built + baseline i-000 | Quét codebase có sẵn (dự án brownfield) để dựng tài liệu as-built và lập baseline `i-000` làm điểm xuất phát tri thức hệ thống. |
+| 1 | `/tn-yeu-cau` | `phan-tich-nghiep-vu` | `frd.md` (hỏi làm rõ trước khi chốt) | Phân tích nghiệp vụ: làm rõ yêu cầu với người dùng, chốt phạm vi và viết đặc tả chức năng (FRD). |
+| 2 | `/tn-thiet-ke` | `thiet-ke-he-thong` | `tech.md` → `sad.md` | Thiết kế kỹ thuật từ FRD: lựa chọn công nghệ/kiến trúc (`tech.md`) rồi tổng hợp thành tài liệu kiến trúc phần mềm (`sad.md`). |
+| 3 | `/tn-bao-mat` | `bao-mat-he-thong` | `security.md` | Phân tích bảo mật: nhận diện rủi ro, mối đe doạ và biện pháp kiểm soát cho thiết kế đã chốt. |
+| 4 | `/tn-kiem-thu` | `kiem-thu-phan-mem` | `test.md` (test design: condition/scenario/case + E2E Locators, mô tả bằng lời) | Thiết kế kiểm thử: xác định điều kiện/kịch bản/ca kiểm thử và các Locator cho E2E, mô tả bằng lời (chưa sinh code). |
+| 4b | `/tn-sinh-test` | `sinh-test-cases` | phân tầng **Unit/Functional/E2E** + ma trận truy vết (append vào `test.md`) | Phân rã test design thành 3 tầng test pyramid (Unit/Functional/E2E) kèm ma trận truy vết về FRD; chỉ chạy khi `test.md` đã approved. |
+| 5 | `/tn-ke-hoach` | (tổng hợp) | `plan.md` (task + phụ thuộc + tiêu chí Done) | Lập kế hoạch hiện thực: chia task, xác định phụ thuộc và tiêu chí hoàn thành (Done) trước khi code. |
+| 6 | `/tn-code` | (hiện thực) | code + back-prop locator | Viết code theo plan; có gate cứng chặn nếu doc upstream chưa approved/còn open question; cập nhật ngược locator vào tài liệu. |
+| 7 | `/tn-bao-cao` | `chay-kiem-thu` | `report.md` (chạy thật, expected vs actual) | Chạy kiểm thử thật và lập báo cáo so sánh kết quả mong đợi với thực tế. |
+| 8 | `/tn-review` | `review-code` | review; bug → `bugfix.md` + rule (mục dưới) → sửa sau | Review code; mỗi bug ghi vào `bugfix.md` và rút thành 1 dòng rule kinh nghiệm (mục Rules) để lần sau không lặp lại. |
 
 Test case mô tả **bằng lời** (Bước/Dữ liệu vào/Kết quả mong đợi); e2e dùng `data-testid`, **không sinh code Playwright/Cypress**. Bước 4 thiết kế test (condition/scenario/case + Locators); bước 4b phân rã thành **3 tầng test pyramid** (Unit nhiều → Functional vừa → E2E ít) kèm ma trận truy vết về FRD.
 
