@@ -45,6 +45,9 @@ export interface AppConfig {
   jobLeaseMs: number;
   maxAttempts: number;
   retryBackoffMs: number;
+  // i-002 (T1) — giao kết quả file .md / fan-out / cache-serve. Default an toàn (fail-safe).
+  deliveryTargetCap: number; // số subscriber tối đa/job (chống phình deliveryTargets)
+  slackFileSizeLimit: number; // ngưỡng byte file .md trước khi fallback chat
 }
 
 let cached: AppConfig | null = null;
@@ -80,6 +83,8 @@ export function loadConfig(): AppConfig {
     jobLeaseMs: num('JOB_LEASE_MS', 900_000),
     maxAttempts: num('MAX_ATTEMPTS', 3),
     retryBackoffMs: num('RETRY_BACKOFF_MS', 30_000),
+    deliveryTargetCap: num('DELIVERY_TARGET_CAP', 50),
+    slackFileSizeLimit: num('SLACK_FILE_SIZE_LIMIT', 1_000_000), // ~1MB
   };
   return cached;
 }

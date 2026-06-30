@@ -4,7 +4,16 @@
 
 import { Collection, ObjectId } from 'mongodb';
 import { getDb } from './client';
-import { ConfigSnapshot, Finding, JobStatus, ReviewJob, SkillRunResult } from '../../domain/reviewJob';
+import {
+  ConfigSnapshot,
+  DeliveryMode,
+  DeliveryTarget,
+  Finding,
+  JobStatus,
+  ReviewJob,
+  SkillRunResult,
+  isCacheEligible,
+} from '../../domain/reviewJob';
 
 interface JobDoc extends Omit<ReviewJob, 'id'> {
   _id: ObjectId;
@@ -23,6 +32,18 @@ export type EnqueueResult =
   | { status: 'queued'; job: ReviewJob }
   | { status: 'duplicate' }; // đã có job (project,pr,commit) đang chạy/chờ
 
+// i-002 (ADR-013): kết quả của enqueue-or-subscribe atomic.
+export type EnqueueOrSubscribeResult =
+  | { status: 'queued'; job: ReviewJob } // thắng race insert → tạo job mới
+  | { status: 'subscribed'; job: ReviewJob } // có job active → thêm delivery target
+  | { status: 'already_subscribed'; job: ReviewJob } // (channel,thread) đã đăng ký
+  | { status: 'cap_reached'; job: ReviewJob } // vượt cap target → ack thread gốc
+  | { status: 'race_none' }; // job vừa rời active (completed/failed) giữa chừng → caller re-route
+
+function isDupKey(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && (e as { code?: number }).code === 11000;
+}
+
 export const reviewJobRepository = {
   /** Enqueue idempotent. Trùng `(project,pr,commit)` đang active → duplicate (chống double-submit). */
   async enqueue(job: Omit<ReviewJob, 'id'>): Promise<EnqueueResult> {
@@ -32,11 +53,132 @@ export const reviewJobRepository = {
       return { status: 'queued', job: { id: _id.toHexString(), ...job } };
     } catch (e: unknown) {
       // Lỗi duplicate key trên uniq_active_idempotency → đang có job active.
-      if (typeof e === 'object' && e && (e as { code?: number }).code === 11000) {
-        return { status: 'duplicate' };
-      }
+      if (isDupKey(e)) return { status: 'duplicate' };
       throw e;
     }
+  },
+
+  /**
+   * i-002 (ADR-013) — Enqueue-or-subscribe ATOMIC: nếu chưa có job active cho khóa → insert
+   * (thắng race = queued); nếu đã có (hoặc thua race insert) → đăng ký delivery target
+   * (dedup theo (channel,thread) + cap). `job.deliveryTargets[0]` là người gõ lệnh.
+   */
+  async enqueueOrSubscribe(job: Omit<ReviewJob, 'id'>, cap: number): Promise<EnqueueOrSubscribeResult> {
+    const target = job.deliveryTargets[0];
+    try {
+      const _id = new ObjectId();
+      await coll().insertOne({ _id, ...job } as JobDoc);
+      return { status: 'queued', job: { id: _id.toHexString(), ...job } };
+    } catch (e: unknown) {
+      if (!isDupKey(e)) throw e;
+      // Đã có job active cho khóa → subscribe target (thua race insert cũng vào đây).
+      return this.subscribeTarget(job.idempotencyKey, target, cap);
+    }
+  },
+
+  /** Thêm 1 delivery target vào job active của khóa (atomic: dedup (channel,thread) + cap). */
+  async subscribeTarget(
+    idempotencyKey: string,
+    target: DeliveryTarget,
+    cap: number,
+  ): Promise<EnqueueOrSubscribeResult> {
+    const d = await coll().findOneAndUpdate(
+      {
+        idempotencyKey,
+        status: { $in: ['queued', 'running'] as JobStatus[] },
+        deliveryTargets: { $not: { $elemMatch: { channel: target.channel, threadTs: target.threadTs } } },
+        $expr: { $lt: [{ $size: '$deliveryTargets' }, cap] },
+      },
+      { $push: { deliveryTargets: target }, $set: { updatedAt: new Date() } },
+      { returnDocument: 'after' },
+    );
+    if (d) return { status: 'subscribed', job: toDomain(d) };
+    // Không match → phân biệt lý do.
+    const active = await coll().findOne({
+      idempotencyKey,
+      status: { $in: ['queued', 'running'] as JobStatus[] },
+    });
+    if (!active) return { status: 'race_none' }; // job vừa hết active
+    const dup = (active.deliveryTargets ?? []).some(
+      (t) => t.channel === target.channel && t.threadTs === target.threadTs,
+    );
+    return dup
+      ? { status: 'already_subscribed', job: toDomain(active) }
+      : { status: 'cap_reached', job: toDomain(active) };
+  },
+
+  /** i-002 (ADR-014) — bản completed HỢP LỆ mới nhất (chưa superseded) theo khóa để cache-serve. */
+  async findCacheEligibleByKey(idempotencyKey: string): Promise<ReviewJob | null> {
+    const docs = await coll()
+      .find({ idempotencyKey, status: 'completed' as JobStatus })
+      .sort({ completedAt: -1, createdAt: -1 })
+      .limit(5)
+      .toArray();
+    for (const d of docs) {
+      const job = toDomain(d);
+      if (isCacheEligible(job)) return job;
+    }
+    return null;
+  },
+
+  /** i-002 (BUG-12): bản completed gần nhất theo khóa (KHÔNG lọc cache-eligible) — cho supersede lineage. */
+  async findLatestCompletedByKey(idempotencyKey: string, excludeId: string): Promise<ReviewJob | null> {
+    const d = await coll()
+      .find({ idempotencyKey, status: 'completed' as JobStatus, _id: { $ne: new ObjectId(excludeId) } })
+      .sort({ completedAt: -1, createdAt: -1 })
+      .limit(1)
+      .next();
+    return d ? toDomain(d) : null;
+  },
+
+  async getById(id: string): Promise<ReviewJob | null> {
+    if (!ObjectId.isValid(id)) return null;
+    const d = await coll().findOne({ _id: new ObjectId(id) });
+    return d ? toDomain(d) : null;
+  },
+
+  /** i-002 — đánh dấu lineage supersede khi `fresh`/rerun tạo job mới. */
+  async markSuperseded(oldJobId: string, newJobId: string): Promise<void> {
+    const now = new Date();
+    await coll().updateOne({ _id: new ObjectId(oldJobId) }, { $set: { supersededByJobId: newJobId, updatedAt: now } });
+    await coll().updateOne({ _id: new ObjectId(newJobId) }, { $set: { supersedesJobId: oldJobId, updatedAt: now } });
+  },
+
+  /**
+   * i-002 (ADR-013) — đánh dấu 1 target đã giao, ATOMIC theo arrayFilter status=pending.
+   * Idempotent: target đã `delivered`/`failed` → không match → trả false (chống double khi reclaim).
+   */
+  async markTargetDelivered(jobId: string, channel: string, threadTs: string, mode: DeliveryMode): Promise<boolean> {
+    // Điều kiện "còn pending" nằm trong FILTER (không chỉ arrayFilter) → nếu đã giao, document
+    // không match → matchedCount 0 (idempotent). KHÔNG dựa modifiedCount vì `updatedAt` luôn set.
+    const res = await coll().updateOne(
+      { _id: new ObjectId(jobId), deliveryTargets: { $elemMatch: { channel, threadTs, status: 'pending' } } },
+      {
+        $set: {
+          'deliveryTargets.$[t].status': 'delivered',
+          'deliveryTargets.$[t].mode': mode,
+          'deliveryTargets.$[t].deliveredAt': new Date(),
+          updatedAt: new Date(),
+        },
+      },
+      { arrayFilters: [{ 't.channel': channel, 't.threadTs': threadTs, 't.status': 'pending' }] },
+    );
+    return res.matchedCount > 0;
+  },
+
+  async markTargetFailed(jobId: string, channel: string, threadTs: string, error: string): Promise<boolean> {
+    const res = await coll().updateOne(
+      { _id: new ObjectId(jobId), deliveryTargets: { $elemMatch: { channel, threadTs, status: 'pending' } } },
+      {
+        $set: {
+          'deliveryTargets.$[t].status': 'failed',
+          'deliveryTargets.$[t].error': error,
+          updatedAt: new Date(),
+        },
+      },
+      { arrayFilters: [{ 't.channel': channel, 't.threadTs': threadTs, 't.status': 'pending' }] },
+    );
+    return res.matchedCount > 0;
   },
 
   /**
@@ -120,9 +262,10 @@ export const reviewJobRepository = {
     id: string,
     data: { findings: Finding[]; skillRuns: SkillRunResult[]; costTokens: number; truncated?: ReviewJob['truncated'] },
   ): Promise<void> {
+    const now = new Date();
     await coll().updateOne(
       { _id: new ObjectId(id) },
-      { $set: { status: 'completed' as JobStatus, ...data, leaseUntil: undefined, updatedAt: new Date() } },
+      { $set: { status: 'completed' as JobStatus, ...data, leaseUntil: undefined, completedAt: now, updatedAt: now } },
     );
   },
 

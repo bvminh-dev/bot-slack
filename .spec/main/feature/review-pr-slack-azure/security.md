@@ -2,8 +2,8 @@
 feature: review-pr-slack-azure
 stage: security
 status: approved
-source: i-001
-updated: 2026-06-25
+source: [i-001, i-002]
+updated: 2026-06-30
 ---
 
 # Asset Inventory
@@ -16,6 +16,9 @@ updated: 2026-06-25
 | Owner identity (Azure userId/email) | MEDIUM (PII) | MongoDB | Registry/Audit |
 | PR code/diff + tài liệu khách hàng | HIGH | temp clone (ephemeral) + qua Anthropic | Worker, 3rd party |
 | Review history/Finding (trích đoạn code) | HIGH | MongoDB | Owner (UI), Slack thread |
+| (i-002) File `.md` báo cáo (đã upload) | HIGH | **Slack workspace (rời bot, không xoá được)** + buffer ephemeral | Mọi người trong channel/thread target |
+| (i-002) Slack Bot Token (`files:write`) | HIGH | ENV/secret store | Gateway/Worker |
+| (i-002) deliveryTargets (channel/threadTs/userId) | MEDIUM (PII routing) | MongoDB | Worker (FanoutDeliverer) |
 
 # Threat Model (STRIDE)
 
@@ -36,6 +39,8 @@ updated: 2026-06-25
 
 Slack Events endpoint (public, spoof/DoS/prompt-injection) `[HIGH]`; Admin API (PAT/IDOR) `[HIGH]`; Admin UI React (XSS/CSRF) `[MEDIUM]`; outbound git clone (SSRF qua repo URL) `[MEDIUM]`; spawn `claude -p` (command/arg + prompt injection) `[HIGH]`; MongoDB (NoSQL injection) `[MEDIUM]`; temp clone (tồn dư) `[MEDIUM]`.
 
+**(i-002) delta:** Slack files endpoint **outbound** (`getUploadURLExternal`→PUT→`completeUploadExternal`; token `files:write`; file rời hệ thống không xoá được) `[HIGH]`; **subscribe path** (đăng ký delivery target qua lệnh trùng — bề mặt nhận dữ liệu chéo) `[HIGH]`; **cache-serve read** (đọc History — tránh BOLA theo jobId) `[HIGH]`; **`fresh` command** (kích hoạt chạy tốn tiền) `[HIGH]`; **chunked chat fallback** (mention injection từ snippet PR) `[MEDIUM]`.
+
 # Authentication Review
 
 - `[HIGH]` Login bằng Azure PAT (A07): verify với Azure profile API; **không lưu/không log PAT**. Self-service (bất kỳ PAT hợp lệ tạo owner) → không allowlist → bù rate-limit+quota+audit.
@@ -54,6 +59,7 @@ Không dùng SSO ở i-001 (PAT thay thế). `[MEDIUM]` Khuyến nghị tương 
 
 - `[CRITICAL]` (A01/API5) Ownership check `project.ownerId===session.ownerId` ở **repository layer**, không chỉ controller.
 - `[HIGH]` Slack review authz (chốt: mọi người) qua hàm tập trung `authorizeReviewCommand` (hiện allow-all) để siết sau; actor≠owner vẫn xem output (residual chấp nhận).
+- `[HIGH] (i-002)` `authorizeReviewCommand` phải áp cho **mọi entrypoint mới**: review + **subscribe** + **cache-serve** + **`fresh`** — nếu bỏ qua subscribe/cache-serve → bypass (người bị chặn vẫn hứng kết quả qua lệnh trùng). Cache-serve đọc theo **khóa resolve**, không jobId tự do (tránh BOLA). Fan-out không cấp quyền mới (target = channel actor đã gõ lệnh).
 
 # Permission Scope Review
 
@@ -104,7 +110,11 @@ Khắc phục: allowlist field, không serialize secret, ownerId server-side, ra
 
 # File Upload Risks
 
-Không phát hiện (không có upload). `[LOW]` Clone repo = nhập file gián tiếp → giới hạn kích thước, bỏ binary/lock, chỉ đọc không thực thi.
+Không phát hiện (không có upload) ở i-001. `[LOW]` Clone repo = nhập file gián tiếp → giới hạn kích thước, bỏ binary/lock, chỉ đọc không thực thi.
+
+**(i-002) thêm upload OUTBOUND (bot→Slack)** — mô hình rủi ro là **data exfiltration**, không phải malware nhận vào:
+- `[HIGH]` File `.md` mang code/finding/secret rời tổ chức lên Slack, **không thu hồi được từ bot** → best-effort **redaction secret-pattern** (API key/PAT/`sk-…`/`password=`/`.env`) + minimization + classification trong builder trước upload; cache-serve dựng lại từ History cũng phải redact.
+- `[MEDIUM]` File vượt giới hạn Slack → chia/fallback, không fail câm. Buffer ephemeral giải phóng sau upload (try/finally).
 
 # Data Protection Review
 
@@ -149,6 +159,9 @@ Không phát hiện (không có upload). `[LOW]` Clone repo = nhập file gián 
 - `[HIGH]` (API3) Response lộ secret/ownerId/project khác → serialize field công khai.
 - `[HIGH]` Slack thread lộ chéo (chính sách mở) → residual + giới hạn output + cảnh báo owner.
 - `[HIGH]` Code → Anthropic → minimization + đồng ý.
+- `[HIGH] (i-002)` File `.md` rời lên Slack **vĩnh viễn** (excessive exposure ra ngoài) → redaction + minimization + classification; chính sách workspace.
+- `[HIGH] (i-002, residual)` Fan-out khuếch đại lộ chéo + cache-serve cross-owner → `authorizeReviewCommand` mọi entrypoint; cache đọc theo khóa resolve (không BOLA jobId); cap target + audit.
+- `[MEDIUM] (i-002)` Admin `/reviews` thêm `deliveries[]` (channel/userId) → chỉ owner xem, không serialize PII thừa.
 - `[MEDIUM]` Error message sạch (không stacktrace/secret); temp clone xoá finally; log code/PII có retention.
 
 # Privilege Escalation Risks ⚠️

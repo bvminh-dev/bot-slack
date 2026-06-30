@@ -16,6 +16,25 @@ export function redactString(input: string): string {
   return out;
 }
 
+// i-002 (T3, sec Data Protection) — redact dùng cho NỘI DUNG báo cáo trước khi rời hệ thống
+// (file .md lên Slack KHÔNG xoá được). Bổ sung các pattern gán secret/cloud key ngoài TOKEN_LIKE.
+// BUG-14 (i-002): mở rộng để bắt biến thể token/secret phổ biến (đo bằng UT data-driven).
+const REPORT_SECRET_PATTERNS = [
+  /gh[opusr]_[A-Za-z0-9]{20,}/g, // GitHub classic/oauth/user/server/refresh (che cả prefix)
+  /github_pat_[A-Za-z0-9_]{20,}/g, // GitHub fine-grained PAT
+  /A[KS]IA[0-9A-Z]{16}/g, // AWS access key id: AKIA (long-term) + ASIA (STS tạm thời)
+  // key=value / key: value — value có thể là chuỗi trong ngoặc kép (CÓ dấu cách) hoặc không-ngoặc.
+  /(?<=(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token|client[_-]?secret|aws_session_token|aws_secret_access_key)\s*[=:]\s*)("[^"\n]{2,}"|'[^'\n]{2,}'|[^\s"'\n]{3,})/gi,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+];
+
+/** Che secret-pattern trong nội dung báo cáo (best-effort) trước khi upload/đăng. */
+export function redactReport(input: string): string {
+  let out = redactString(input);
+  for (const re of REPORT_SECRET_PATTERNS) out = out.replace(re, '«redacted»');
+  return out;
+}
+
 /** Redact đệ quy object trước khi log; che field có tên nghi là secret. */
 export function redact(value: unknown): unknown {
   if (value == null) return value;

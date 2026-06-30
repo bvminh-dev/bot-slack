@@ -19,6 +19,9 @@ export interface ReviewHistoryEntry {
   configSnapshot?: ConfigSnapshot;
   costTokens: number;
   createdAt: string;
+  // i-002 (T13): hiển thị trạng thái giao + lineage supersede ở Admin UI. KHÔNG chứa nội dung/secret.
+  deliveries?: Array<{ channel: string; threadTs: string; status: string; mode?: string }>;
+  supersededByJobId?: string;
 }
 
 interface HistoryDoc extends Omit<ReviewHistoryEntry, 'id'> {
@@ -42,6 +45,47 @@ export const reviewHistoryRepository = {
     await coll().insertOne(doc);
     const { _id: id, ...rest } = doc;
     return { id: id.toHexString(), ...rest };
+  },
+
+  /** i-002 (BUG-09): đọc history theo jobId để re-fanout khi reclaim (không chạy lại skill). */
+  async findByJobId(jobId: string): Promise<ReviewHistoryEntry | null> {
+    const d = await coll().find({ jobId }).sort({ _id: -1 }).limit(1).next();
+    if (!d) return null;
+    const { _id, ...rest } = d;
+    return { id: _id.toHexString(), ...rest };
+  },
+
+  /**
+   * i-002 (T13): ghi trạng thái giao kết quả theo target (cho Admin UI). Khớp theo jobId.
+   * BUG-13: HỢP NHẤT theo (channel,threadTs,mode) thay vì $set mù — tránh xoá bản ghi
+   * cache-serve (appendDelivery) hoặc bản giao của lần fanout trước khi reclaim re-fanout.
+   */
+  async recordDeliveries(
+    jobId: string,
+    deliveries: Array<{ channel: string; threadTs: string; status: string; mode?: string }>,
+  ): Promise<void> {
+    const doc = await coll().findOne({ jobId }, { projection: { deliveries: 1 } });
+    const existing = (doc?.deliveries ?? []) as Array<{ channel: string; threadTs: string; status: string; mode?: string }>;
+    const merged = [...existing];
+    for (const d of deliveries) {
+      const i = merged.findIndex((m) => m.channel === d.channel && m.threadTs === d.threadTs && m.mode === d.mode);
+      if (i >= 0) merged[i] = d;
+      else merged.push(d);
+    }
+    await coll().updateOne({ jobId }, { $set: { deliveries: merged } });
+  },
+
+  /** i-002: đánh dấu bản history bị `fresh` thay (Admin UI badge superseded). */
+  async markSuperseded(jobId: string, supersededByJobId: string): Promise<void> {
+    await coll().updateOne({ jobId }, { $set: { supersededByJobId } });
+  },
+
+  /** i-002: thêm 1 bản ghi giao (vd cache-serve) vào history của job đã có (Admin UI). */
+  async appendDelivery(
+    jobId: string,
+    delivery: { channel: string; threadTs: string; status: string; mode?: string },
+  ): Promise<void> {
+    await coll().updateOne({ jobId }, { $push: { deliveries: delivery } });
   },
 
   /** Lịch sử của 1 project — RÀNG BUỘC ownerId (sec: không trả project người khác). */

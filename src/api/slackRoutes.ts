@@ -3,6 +3,9 @@ import { Request, Response, Router } from 'express';
 import { verifySlackSignature } from '../adapters/slack/slackSignature';
 import { ISlackPort } from '../ports/interfaces';
 import { ReviewCommandService } from '../application/reviewCommandService';
+import { buildReport, ResultDeliverer } from '../application/resultPresenter';
+import { buildStaleNote } from '../application/reviewReport';
+import { reviewHistoryRepository } from '../adapters/mongo/reviewHistoryRepository';
 import { DomainError } from '../domain/errors';
 import { logger, newCorrelationId } from '../observability/logger';
 
@@ -22,6 +25,7 @@ interface SlackEventBody {
 
 export function slackRoutes(commandService: ReviewCommandService, slack: ISlackPort): Router {
   const r = Router();
+  const deliverer = new ResultDeliverer(slack);
 
   // Dùng raw body (express.raw) để verify HMAC chính xác trên endpoint này.
   r.post('/events', async (req: Request, res: Response) => {
@@ -71,11 +75,35 @@ export function slackRoutes(commandService: ReviewCommandService, slack: ISlackP
             threadTs,
             text: `⏳ Đã nhận lệnh review PR #${result.prId} (project ${result.project}). Đang xử lý…`,
           });
-        } else if (result.kind === 'duplicate') {
+        } else if (result.kind === 'subscribed') {
+          // i-002 (ADR-013): lệnh trùng lúc đang chạy → ack chờ, sẽ nhận kết quả (fan-out) tại đây.
           await slack.ackInThread({
             channel,
             threadTs,
-            text: `↩️ PR #${result.prId} đang được review (đã có job đang chạy).`,
+            text: `⏳ PR #${result.prId} đang được review. Kết quả sẽ được gửi vào đây khi xong.`,
+          });
+        } else if (result.kind === 'cache') {
+          // i-002 (ADR-014): trả kết quả từ DB ngay (0 token) tới chính nơi vừa hỏi.
+          const job = result.cachedJob;
+          const report = buildReport(result.project, {
+            prId: job.prId,
+            prUrl: job.prUrl,
+            commitHash: job.commitHash,
+            findings: job.findings,
+            skillRuns: job.skillRuns,
+            costTokens: job.costTokens,
+            configSnapshot: job.configSnapshot,
+          });
+          const out = await deliverer.deliver(report, channel, threadTs, buildStaleNote(job.completedAt, job.commitHash));
+          // Ghi delivery 'cache' vào history của bản được phục vụ (Admin UI: chỉ báo cache-hit).
+          await reviewHistoryRepository
+            .appendDelivery(job.id, { channel, threadTs, status: out.ok ? 'delivered' : 'failed', mode: 'cache' })
+            .catch(() => undefined);
+        } else if (result.kind === 'cap_reached') {
+          await slack.ackInThread({
+            channel,
+            threadTs,
+            text: `ℹ️ PR #${result.prId} đang được nhiều người theo dõi — kết quả sẽ được gửi ở thread gốc.`,
           });
         } else {
           await slack.ackInThread({ channel, threadTs, text: `⚠️ ${result.reason}` });

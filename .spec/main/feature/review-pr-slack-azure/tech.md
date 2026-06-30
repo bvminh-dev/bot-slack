@@ -2,8 +2,8 @@
 feature: review-pr-slack-azure
 stage: tech
 status: approved
-source: i-001
-updated: 2026-06-25
+source: [i-001, i-002]
+updated: 2026-06-30
 ---
 
 # Tóm Tắt Kiến Trúc
@@ -76,10 +76,13 @@ ACL bọc hệ ngoài (Slack/Azure/Claude CLI). Project Registry là Customer-Su
 
 `[HIGH]` Không nhúng job vào Project (tham chiếu projectId). `[LOW]` enqueue+audit nên cùng thao tác (Mongo txn/outbox).
 
+**(i-002)** `ReviewJob` mở rộng: `deliveryTargets[]` (`{channel, threadTs, userId, status: pending|delivered|failed, mode: file|chat|cache, deliveredAt, error?}`, cap ~50/job), `supersedesJobId`/`supersededByJobId` (ghi thực khi rerun), `cacheEligible` (dẫn xuất). `ReviewReport (.md)` KHÔNG lưu trong aggregate — dựng on-demand từ History (ADR-015). `[HIGH]` cập nhật status per-target phải atomic (`arrayFilters` status=pending) chống double-delivery khi reclaim (ADR-013).
+
 # Domain Events
 
 Catalog: `ReviewCommandReceived → ReviewJobQueued → ReviewJobStarted (+ConfigSnapshotTaken) → PullRequestFetched/Failed → ContextPrepared → SkillRunCompleted/Failed/Partial → FindingsAggregated → ReviewJobCompleted/Failed → TempCloneCleaned`; cấu hình: `ProjectCreated/Updated/Deleted`, `SecretRotated`.
 - `[HIGH]` thiếu `ReviewJobDuplicateRejected` & `ConfigSnapshotTaken` nếu không thêm. `[MEDIUM]` thiếu cleanup khi job lỗi. Không có circular event.
+- **(i-002)** Catalog event delta: bỏ `ReviewJobDuplicateRejected` khỏi luồng hợp lệ → thêm `DeliveryTargetRegistered` (subscribe), `ReviewResultServedFromCache` (cache-hit), `ReviewRerunRequested` (fresh→`ReviewJobQueued(supersedes)`), `ResultDelivered`/`ResultDeliveryFailed` (per-target), `ReviewJobDelivered` (fan-out xong). `EnqueueOrSubscribe` = atomic upsert: active job → register; completed hợp lệ → cache-serve; else queue (ADR-013/014).
 
 # Event Storming
 
@@ -140,6 +143,8 @@ Modular Monolith (Clean Arch nội bộ); **DB-backed queue** (collection `revie
 
 `[HIGH]` ghi history TRƯỚC khi post Slack. `[MEDIUM]` circuit breaker theo project token.
 
+**(i-002)** Slack giao kết quả: upload `.md` qua **2 bước** `files.getUploadURLExternal`→PUT bytes→`files.completeUploadExternal` (`files.upload` đã khai tử); chỉ mark `delivered` sau khi `completeUploadExternal` OK. `[HIGH]` lỗi giữa 2 bước → coi chưa giao, fallback **chunk chat** (<~3000 ký tự, cắt theo section/finding) cùng target; cả hai fail → `delivery_failed` + alert. `[MEDIUM]` tôn trọng 429 `Retry-After` khi fan-out nhiều target/part.
+
 # Integration Failure Analysis
 
 | Kịch bản | Còn chạy? | Mất data? | Xử lý | Mức |
@@ -159,6 +164,7 @@ Modular Monolith (Clean Arch nội bộ); **DB-backed queue** (collection `revie
 
 Pool model, cô lập bằng `ownerId` + filter bắt buộc ở repository.
 - `[CRITICAL]` thiếu filter 1 query → leak chéo (IDOR). `[HIGH]` Slack cho mọi người review mọi project → lộ code/tài liệu project khác (FRD #8); điểm chốt `authorizeReviewCommand`.
+- `[HIGH]` **(i-002)** Fan-out + cache-serve đẩy kết quả tới nhiều channel/thread/DM → mở rộng bề mặt lộ dữ liệu chéo; `authorizeReviewCommand` phải áp cho **review + subscribe + cache-serve + `fresh`**. File `.md` rời lên Slack không xoá được từ bot. → ranh giới ở `/tn-bao-mat`.
 
 # Authentication Review
 
@@ -228,6 +234,11 @@ Ownership-based (ABAC nhẹ theo `ownerId`). Admin: `project.ownerId===session.o
 | ADR-009 | "Tài liệu hệ thống" = in-repo `.spec/`,`docs/`,README,`*.md` + nguồn cấu hình | FRD #5 | chỉ in-repo | dedupe | ContextBuilder gom ưu tiên |
 | ADR-010 | Lưu history TRƯỚC post Slack; xoá clone trong finally | không mất kết quả; không tồn data nhạy cảm | post trực tiếp | thêm bước DB | review luôn truy lại; clone luôn dọn |
 | ADR-011 | ACL ports ISlackPort/IAzureClient/ISkillRunner | bảo vệ Core | gọi trực tiếp | thêm lớp | đổi provider không vỡ Core |
+| ADR-012 (i-002) | Output **luôn file `.md`** + tóm tắt inline; upload `files.getUploadURLExternal`+`completeUploadExternal`; fallback chunk chat | review dài vượt trần Slack; `files.upload` khai tử | post text / đính kèm khi dài | thêm build file + upload 2 bước | **override output i-001**; scope `files:write`; `ISlackPort` thêm `uploadMarkdown/postChunked` |
+| ADR-013 (i-002) | **Fan-out** `deliveryTargets[]` + status per-target; lệnh trùng → **register** (không reject); atomic upsert enqueue-or-subscribe | trả mọi nơi; chống race 2 job; idempotent reclaim | reject duplicate (ADR-007) | tự viết upsert + status phức tạp | **override ADR-007**; cap target/job; cập nhật atomic |
+| ADR-014 (i-002) | **Cache-serve** từ History khi `completed` hợp lệ; `fresh`/`rerun` bỏ qua + `supersedes` | tiết kiệm token; vẫn ép mới được | luôn chạy lại / luôn cache | định nghĩa "hợp lệ" + ghi supersedes thực | `ReviewResultView`; "hợp lệ"=completed & ≥1 finding & không lỗi-toàn-phần |
+| ADR-015 (i-002) | KHÔNG lưu artifact `.md` — dựng on-demand từ History | giảm bề mặt lưu data nhạy cảm | lưu blob/CDN | tốn CPU build lại | builder từ `Finding[]`; ephemeral |
+| ADR-016 (i-002) | Khóa fan-out/cache = `(projectId,prId,commitHash)` commit-aware | đúng code tại commit | bỏ qua commit | commit mới không trúng cache cũ (đúng ý) | tái dùng unique index ADR-007 |
 
 # Quality Attribute Assessment
 

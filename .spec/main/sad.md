@@ -2,8 +2,8 @@
 doc: sad
 title: Software Architecture Document — tieu-nhi (Slack bot review PR Azure)
 status: living
-updated: 2026-06-25
-sources: [i-001]
+updated: 2026-06-30
+sources: [i-001, i-002]
 ---
 
 # SAD — Trạng thái kiến trúc hợp nhất
@@ -49,8 +49,8 @@ Context Mapping: Registry = Customer-Supplier (upstream) của Orchestration; Id
 
 1. **Tenant isolation:** mọi truy vấn project lọc `ownerId` (lấy từ session, không từ client); tài nguyên người khác trả 404. *(CRITICAL)*
 2. **Secret write-only + mã hoá at-rest:** không bao giờ đọc-trả lại secret; chi tiết khoá master ở security.md.
-3. **Idempotency `(projectId, prId, commitHash)`** + snapshot cấu hình + skill version vào mỗi `ReviewJob`. *(ADR-007)*
-4. **Lưu history TRƯỚC khi post Slack; xoá temp clone trong `finally`.** *(ADR-010)*
+3. **Idempotency `(projectId, prId, commitHash)`** + snapshot cấu hình + skill version vào mỗi `ReviewJob`. *(ADR-007)* — **(i-002)** lệnh trùng khóa khi job đang chạy KHÔNG còn bị reject mà **register thành delivery target** + fan-out; khóa đã `completed` hợp lệ → **cache-serve** từ History (không tốn token); `fresh`/`rerun` ép chạy lại (`supersedes`). *(ADR-013/014/016)*
+4. **Lưu history TRƯỚC khi post Slack; xoá temp clone trong `finally`.** *(ADR-010)* — **(i-002)** kết quả giao dạng **file `.md` + tóm tắt inline** (fallback chunk chat); fan-out **idempotent per-target** (trạng thái giao trong job) để reclaim không giao trùng. *(ADR-012/013)*
 5. **Resiliency hệ ngoài:** retry/backoff/timeout + lease/visibility timeout + circuit breaker theo project token.
 6. **Untrusted input:** nội dung PR là dữ liệu không tin cậy → chống prompt injection vào skill.
 7. **Observability:** correlation id xuyên Slack→job→skill→post; structured log lọc secret; metrics cost/queue/error theo project.
@@ -70,6 +70,11 @@ Context Mapping: Registry = Customer-Supplier (upstream) của Orchestration; Id
 | ADR-009 | "Tài liệu hệ thống" = in-repo (`.spec/`,`docs/`,README,`*.md`) + nguồn cấu hình project | i-001 |
 | ADR-010 | Lưu history trước post Slack; xoá temp clone trong finally | i-001 |
 | ADR-011 | ACL ports cho Slack/Azure/Claude CLI | i-001 |
+| ADR-012 | Output **luôn file `.md`** + tóm tắt inline; upload `files.getUploadURLExternal`+`completeUploadExternal`; fallback chunk chat | i-002 |
+| ADR-013 | **Fan-out** qua `deliveryTargets[]` + trạng thái giao per-target; lệnh trùng → **register (không reject)**; atomic upsert enqueue-or-subscribe — **override ADR-007** | i-002 |
+| ADR-014 | **Cache-serve** từ History (CQRS read) khi `completed` hợp lệ; `fresh`/`rerun` bỏ qua cache + `supersedes` | i-002 |
+| ADR-015 | KHÔNG lưu artifact `.md` — dựng on-demand từ History | i-002 |
+| ADR-016 | Khóa fan-out/cache = `(projectId, prId, commitHash)` commit-aware (tái dùng index ADR-007) | i-002 |
 
 > Chi tiết Decision/Reason/Alternative/Trade-Off/Consequence: `main/feature/review-pr-slack-azure/tech.md`.
 
@@ -79,6 +84,7 @@ Context Mapping: Registry = Customer-Supplier (upstream) của Orchestration; Id
 - `[CRITICAL]` Xung đột isolation: Admin cô lập theo owner nhưng Slack cho mọi người review mọi project (FRD #8) — điểm chốt `authorizeReviewCommand` đã chuẩn bị.
 - `[HIGH]` Scalability: DB-queue poll là trần ~10.000+ job → đường mở rộng sang message broker + tách worker.
 - `[HIGH]` Skill `.claude/skills` là shared dependency có version → pin + ghi version vào job để tái lập.
+- `[HIGH]` **(i-002)** Fan-out + cache-serve **mở rộng bề mặt lộ dữ liệu chéo**: kết quả review (code/tài liệu private) đẩy tới nhiều channel/thread/DM; người ngoài có thể subscribe/cache-serve PR người khác. Điểm chốt `authorizeReviewCommand` áp cho review + subscribe + cache-serve + `fresh`; file `.md` rời lên Slack không xoá được từ bot → đánh giá ranh giới ở `/tn-bao-mat`.
 
 ## 7. Catalog model + effort (hệ thống)
 

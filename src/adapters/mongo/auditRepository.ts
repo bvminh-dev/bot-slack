@@ -11,6 +11,10 @@ export type AuditAction =
   | 'review.command'
   | 'review.completed'
   | 'review.failed'
+  | 'review.cache_hit' // i-002: trả kết quả từ History (0 token)
+  | 'review.rerun' // i-002: `fresh` ép chạy lại (supersedes)
+  | 'review.delivered' // i-002: đã giao kết quả tới 1 delivery target (file/chat/cache)
+  | 'review.delivery_failed' // i-002: giao thất bại (cả file lẫn chat)
   | 'access.denied';
 
 export interface AuditEntry {

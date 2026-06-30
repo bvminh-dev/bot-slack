@@ -26,6 +26,10 @@ Hệ thống **quản lý nhiều project** (vd `LMS` ↔ `https://dev.azure.com
 - Lấy PR (metadata, diff, file thay đổi) + clone/đọc codebase + tài liệu hệ thống từ Azure DevOps.
 - Điều phối chạy skill review theo loại file (auto-select).
 - Đăng kết quả review (tóm tắt + chi tiết theo mức rủi ro) vào thread Slack; xử lý bất đồng bộ (ack ngay, trả kết quả sau).
+- **(i-002) Giao kết quả dạng file `.md` đính kèm** (toàn bộ review) **+ 1 dòng tóm tắt inline** (đếm severity + link PR + commit) thay cho post text dài; **fallback chia nhỏ chat mrkdwn** khi upload file lỗi.
+- **(i-002) Fan-out theo khóa `(projectId, prId, commitHash)`**: lệnh trùng lúc job đang chạy → ack chờ + đăng ký nơi hỏi (channel/thread) làm **delivery target**; khi xong, kết quả fan-out tới **tất cả** target (idempotent, trạng thái giao per-target).
+- **(i-002) Cache-serve từ DB**: khóa đã `completed` → trả kết quả từ history ngay, **không chạy lại / không tốn token**; cú pháp `fresh`/`rerun` để ép review mới (đánh dấu `supersedes`).
+  > [i-002] thay thế quy tắc i-001 (ADR-007 reject lệnh trùng "đang chạy") → **đăng ký + fan-out**; output i-001 "đính kèm khi dài" → **luôn file `.md` + tóm tắt**.
 
 **Ngoài phạm vi (out-of-scope) lần này:**
 - Đăng comment ngược lên Azure PR (đã chọn chỉ trả Slack thread).

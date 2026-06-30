@@ -29,7 +29,10 @@ import { projectRepository } from '../adapters/mongo/projectRepository';
 import { reviewJobRepository } from '../adapters/mongo/reviewJobRepository';
 import { encryptSecret } from '../adapters/crypto/secretCrypto';
 import { ReviewCommandService } from '../application/reviewCommandService';
+import { ReviewOrchestrator } from '../application/reviewOrchestrator';
+import { reviewHistoryRepository } from '../adapters/mongo/reviewHistoryRepository';
 import { RateLimiter } from '../application/rateLimiter';
+import type { ISkillRunner, ISlackPort } from '../ports/interfaces';
 import { makeIdempotencyKey } from '../domain/reviewJob';
 import { ValidationError } from '../domain/errors';
 import type { PrInfo } from '../ports/interfaces';
@@ -100,7 +103,9 @@ function baseJob(over: Record<string, unknown>) {
     projectId: 'p1', ownerId: 'o1', prId: '123', commitHash: 'abc',
     idempotencyKey: 'p1:123:abc', slackChannel: 'C1', slackThreadTs: 'T1', slackUserId: 'U1',
     prUrl: PR_URL, status: 'queued', availableAt: now, attempts: 0,
-    findings: [], skillRuns: [], costTokens: 0, createdAt: now, updatedAt: now,
+    findings: [], skillRuns: [], costTokens: 0,
+    deliveryTargets: [{ channel: 'C1', threadTs: 'T1', userId: 'U1', requestedAt: now, status: 'pending' }],
+    createdAt: now, updatedAt: now,
     ...over,
   } as Parameters<typeof reviewJobRepository.enqueue>[0];
 }
@@ -239,6 +244,153 @@ test('FT-16 idempotency: enqueue 2 lần cùng key → lần 2 duplicate', async
   assert.equal(r2.status, 'duplicate');
 });
 
+// i-002 (T15 regression: reject→subscribe). FT-201: enqueue-or-subscribe atomic.
+test('FT-201 enqueueOrSubscribe: lần 1 queued; lần 2 cùng key (thread khác) → subscribed (1 job, +1 target)', async (t) => {
+  if (!mongoUp) return t.skip('mongo unavailable');
+  const r1 = await reviewJobRepository.enqueueOrSubscribe(baseJob({}), 50);
+  const r2 = await reviewJobRepository.enqueueOrSubscribe(
+    baseJob({ deliveryTargets: [{ channel: 'C2', threadTs: 'T2', userId: 'U2', requestedAt: new Date(), status: 'pending' }] }),
+    50,
+  );
+  assert.equal(r1.status, 'queued');
+  assert.equal(r2.status, 'subscribed');
+  assert.equal(await getDb().collection('review_jobs').countDocuments({ idempotencyKey: 'p1:123:abc' }), 1, 'đúng 1 job');
+  const doc = await getDb().collection('review_jobs').findOne({ idempotencyKey: 'p1:123:abc' });
+  assert.equal((doc?.deliveryTargets as unknown[]).length, 2, '2 delivery target');
+});
+
+// FT-214: cùng (channel,thread) đăng ký lại → dedup (already_subscribed), không thêm target.
+test('FT-214 subscribe trùng (channel,thread) → already_subscribed, không nhân target', async (t) => {
+  if (!mongoUp) return t.skip('mongo unavailable');
+  await reviewJobRepository.enqueueOrSubscribe(baseJob({}), 50);
+  const dup = await reviewJobRepository.enqueueOrSubscribe(baseJob({}), 50);
+  assert.equal(dup.status, 'already_subscribed');
+  const doc = await getDb().collection('review_jobs').findOne({ idempotencyKey: 'p1:123:abc' });
+  assert.equal((doc?.deliveryTargets as unknown[]).length, 1);
+});
+
+// FT-213: vượt cap → cap_reached, không thêm target.
+test('FT-213 vượt cap delivery target → cap_reached', async (t) => {
+  if (!mongoUp) return t.skip('mongo unavailable');
+  await reviewJobRepository.enqueueOrSubscribe(baseJob({}), 1); // cap=1, đã có 1 target
+  const over = await reviewJobRepository.enqueueOrSubscribe(
+    baseJob({ deliveryTargets: [{ channel: 'C9', threadTs: 'T9', userId: 'U9', requestedAt: new Date(), status: 'pending' }] }),
+    1,
+  );
+  assert.equal(over.status, 'cap_reached');
+});
+
+// FT-204: per-target delivery idempotent — mark lần 2 (reclaim) trả false, KHÔNG giao trùng.
+test('FT-204 markTargetDelivered idempotent: lần 2 (reclaim) không match (chống double-delivery)', async (t) => {
+  if (!mongoUp) return t.skip('mongo unavailable');
+  const enq = await reviewJobRepository.enqueueOrSubscribe(
+    baseJob({
+      deliveryTargets: [
+        { channel: 'C1', threadTs: 'T1', userId: 'U1', requestedAt: new Date(), status: 'pending' },
+        { channel: 'C2', threadTs: 'T2', userId: 'U2', requestedAt: new Date(), status: 'pending' },
+      ],
+    }),
+    50,
+  );
+  const jobId = (enq as { job: { id: string } }).job.id;
+  // giao target #1 lần đầu → true
+  assert.equal(await reviewJobRepository.markTargetDelivered(jobId, 'C1', 'T1', 'file'), true);
+  // reclaim/giao lại #1 → false (đã 'delivered', không match pending)
+  assert.equal(await reviewJobRepository.markTargetDelivered(jobId, 'C1', 'T1', 'file'), false);
+  // #2 vẫn pending → giao được
+  assert.equal(await reviewJobRepository.markTargetDelivered(jobId, 'C2', 'T2', 'chat'), true);
+  const fresh = await reviewJobRepository.getById(jobId);
+  assert.deepEqual(
+    fresh?.deliveryTargets.map((d) => d.status),
+    ['delivered', 'delivered'],
+  );
+  assert.equal(fresh?.deliveryTargets[0].mode, 'file');
+  assert.equal(fresh?.deliveryTargets[1].mode, 'chat');
+});
+
+// BUG-12 regression: supersede lineage lấy bản completed gần nhất theo khóa kể cả KHÔNG cache-eligible.
+test('FT-212b findLatestCompletedByKey trả cả bản lỗi-toàn-phần (supersede lineage không mất)', async (t) => {
+  if (!mongoUp) return t.skip('mongo unavailable');
+  // bản completed nhưng mọi skill fail (KHÔNG cache-eligible)
+  const failed = await reviewJobRepository.enqueue(
+    baseJob({
+      idempotencyKey: 'lk:1:c', prId: '1', commitHash: 'c', status: 'completed',
+      skillRuns: [{ skill: 'review-code', status: 'failed', findingCount: 0, error: 'x' }], completedAt: new Date(),
+    }),
+  );
+  const prevId = (failed as { job: { id: string } }).job.id;
+  assert.equal(await reviewJobRepository.findCacheEligibleByKey('lk:1:c'), null, 'không cache-eligible');
+  const latest = await reviewJobRepository.findLatestCompletedByKey('lk:1:c', 'ffffffffffffffffffffffff');
+  assert.ok(latest && latest.id === prevId, 'vẫn tìm được bản completed gần nhất cho supersede');
+});
+
+// BUG-09 regression: reclaim job đã có history → RE-FANOUT từ history (idempotent), KHÔNG chạy lại skill.
+test('FT-204b reclaim-after-history: giao lại mọi target pending từ history, không chạy skill', async (t) => {
+  if (!mongoUp) return t.skip('mongo unavailable');
+  const project = await seedProject('owner-1', 'LMS');
+  // Job đang 'running' với 2 target pending (mô phỏng worker chết giữa chừng).
+  const enq = await reviewJobRepository.enqueueOrSubscribe(
+    baseJob({
+      projectId: project.id, ownerId: 'owner-1', idempotencyKey: `${project.id}:123:abc`, status: 'running',
+      deliveryTargets: [
+        { channel: 'C1', threadTs: 'T1', userId: 'U1', requestedAt: new Date(), status: 'pending' },
+        { channel: 'C2', threadTs: 'T2', userId: 'U2', requestedAt: new Date(), status: 'pending' },
+      ],
+    }),
+    50,
+  );
+  const jobId = (enq as { job: { id: string } }).job.id;
+  // History đã có (lần chạy trước lưu kết quả rồi crash trước khi giao).
+  await reviewHistoryRepository.save({
+    jobId, ownerId: 'owner-1', projectId: project.id, prId: '123', prUrl: PR_URL, commitHash: 'abc',
+    status: 'completed', findings: [{ skill: 'review-code', severity: 'HIGH', title: 'x' }],
+    skillRuns: [{ skill: 'review-code', status: 'completed', findingCount: 1 }], costTokens: 10,
+  });
+
+  const uploads: string[] = [];
+  const fakeSlack: ISlackPort = {
+    ackInThread: async () => undefined,
+    postResult: async () => undefined,
+    react: async () => undefined,
+    postText: async () => true,
+    uploadMarkdown: async ({ channel }) => { uploads.push(channel); return true; },
+  };
+  const skillRunner: ISkillRunner = { run: async () => { throw new Error('skill KHÔNG được chạy lại khi reclaim'); } };
+  const orch = new ReviewOrchestrator(azureClient, skillRunner, fakeSlack);
+
+  const job = await reviewJobRepository.getById(jobId);
+  await orch.process(job!, 'corr-reclaim');
+
+  assert.deepEqual(uploads.sort(), ['C1', 'C2'], 'giao lại cả 2 target từ history');
+  const after = await reviewJobRepository.getById(jobId);
+  assert.equal(after?.status, 'completed');
+  assert.deepEqual(after?.deliveryTargets.map((d) => d.status), ['delivered', 'delivered']);
+});
+
+// FT-205: cache-eligible lookup loại job failed/superseded.
+test('FT-205 findCacheEligibleByKey: trả completed hợp lệ, bỏ failed/superseded', async (t) => {
+  if (!mongoUp) return t.skip('mongo unavailable');
+  // job completed hợp lệ
+  await reviewJobRepository.enqueue(
+    baseJob({
+      idempotencyKey: 'pk:1:c', prId: '1', commitHash: 'c', status: 'completed',
+      skillRuns: [{ skill: 'review-code', status: 'completed', findingCount: 1 }],
+      findings: [{ skill: 'review-code', severity: 'HIGH', title: 'x' }], completedAt: new Date(),
+    }),
+  );
+  const hit = await reviewJobRepository.findCacheEligibleByKey('pk:1:c');
+  assert.ok(hit, 'phải tìm thấy bản completed hợp lệ');
+
+  // job failed (mọi skill fail) → KHÔNG eligible
+  await reviewJobRepository.enqueue(
+    baseJob({
+      idempotencyKey: 'pk:2:c', prId: '2', commitHash: 'c', status: 'completed',
+      skillRuns: [{ skill: 'review-code', status: 'failed', findingCount: 0, error: 'x' }], completedAt: new Date(),
+    }),
+  );
+  assert.equal(await reviewJobRepository.findCacheEligibleByKey('pk:2:c'), null, 'lỗi-toàn-phần → không cache');
+});
+
 test('FT-17 2 worker claim 1 job → chỉ 1 thắng (atomic)', async (t) => {
   if (!mongoUp) return t.skip('mongo unavailable');
   await reviewJobRepository.enqueue(baseJob({}));
@@ -273,7 +425,7 @@ test('FT-21 xoá/disable project → cancelQueuedByProject huỷ job chờ', asy
 
 // ===================== E2E-07: luồng Slack đầu-cuối (non-DOM) =====================
 
-test('E2E-07 lệnh review hợp lệ → queued; double-submit cùng PR/commit → duplicate', async (t) => {
+test('E2E-07 lệnh review hợp lệ → queued; lệnh trùng cùng PR/commit (thread khác) → subscribed (i-002)', async (t) => {
   if (!mongoUp) return t.skip('mongo unavailable');
   await seedProject('owner-1', 'LMS');
   const svc = new ReviewCommandService(azureClient, new RateLimiter());
@@ -282,8 +434,9 @@ test('E2E-07 lệnh review hợp lệ → queued; double-submit cùng PR/commit 
   const first = await svc.handle(ctx);
   assert.equal(first.kind, 'queued');
 
-  const second = await svc.handle({ ...ctx, userId: 'U2' }); // user khác để tránh rate-limit
-  assert.equal(second.kind, 'duplicate');
+  // i-002 (T15): lệnh trùng lúc đang chạy KHÔNG còn reject — đăng ký fan-out (thread khác → subscribed).
+  const second = await svc.handle({ channel: 'C2', threadTs: 'T2', userId: 'U2', text: `<@U0> LMS review ${PR_URL}` });
+  assert.equal(second.kind, 'subscribed');
 
   // đúng idempotencyKey đã dùng
   const key = makeIdempotencyKey((await getDb().collection('projects').findOne({ nameLower: 'lms' }))!._id.toHexString(), '123', 'abc');

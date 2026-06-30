@@ -6,31 +6,21 @@
 import { IAzureClient, ISkillRunner, ISlackPort } from '../ports/interfaces';
 import { ContextBuilder } from './contextBuilder';
 import { getSkillVersion } from './skillVersion';
+import { buildReport, ResultDeliverer } from './resultPresenter';
 import { projectRepository } from '../adapters/mongo/projectRepository';
 import { reviewJobRepository } from '../adapters/mongo/reviewJobRepository';
 import { reviewHistoryRepository } from '../adapters/mongo/reviewHistoryRepository';
 import { auditRepository } from '../adapters/mongo/auditRepository';
 import { decryptSecret } from '../adapters/crypto/secretCrypto';
-import { ConfigSnapshot, Finding, ReviewJob, SkillRunResult, Severity, severityCounts } from '../domain/reviewJob';
+import { ConfigSnapshot, DeliveryTarget, Finding, ReviewJob, SkillRunResult } from '../domain/reviewJob';
 import { CircuitBreaker } from '../observability/circuitBreaker';
 import { logger } from '../observability/logger';
 import { IntegrationError } from '../domain/errors';
 import { loadConfig } from '../config/env';
 
-const SEV_ORDER: Severity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
-const SEV_EMOJI: Record<Severity, string> = { CRITICAL: '🔴', HIGH: '🟠', MEDIUM: '🟡', LOW: '⚪' };
-
-/** Chuẩn hoá text về Slack mrkdwn: gộp xuống dòng, đổi **đậm**→*đậm*, bỏ heading markdown (#). */
-function toSlackText(s: string): string {
-  return s
-    .replace(/\s*\n\s*/g, ' ')
-    .replace(/\*\*(.+?)\*\*/g, '*$1*')
-    .replace(/(^|\s)#{1,6}\s+/g, '$1')
-    .trim();
-}
-
 export class ReviewOrchestrator {
   private readonly ctxBuilder: ContextBuilder;
+  private readonly deliverer: ResultDeliverer;
   constructor(
     private readonly azure: IAzureClient,
     private readonly skillRunner: ISkillRunner,
@@ -38,6 +28,7 @@ export class ReviewOrchestrator {
     private readonly breaker = new CircuitBreaker(),
   ) {
     this.ctxBuilder = new ContextBuilder(azure);
+    this.deliverer = new ResultDeliverer(slack);
   }
 
   async process(job: ReviewJob, correlationId: string): Promise<void> {
@@ -48,15 +39,33 @@ export class ReviewOrchestrator {
         throw new Error('Tạm ngừng review project này do lỗi liên tục (circuit breaker mở).');
       }
 
-      // BUG-03: idempotency guard — nếu job này đã tạo history (đã post Slack ở lần chạy trước,
-      // crash trước khi complete), KHÔNG chạy lại side-effect; chỉ chốt completed.
+      // BUG-03 + BUG-09: nếu job đã tạo history (lần chạy trước lưu kết quả rồi crash/lease hết
+      // TRƯỚC khi giao xong) → KHÔNG chạy lại skill (tốn token), nhưng PHẢI GIAO LẠI từ history
+      // (fan-out idempotent per-target: target đã 'delivered' bị bỏ qua, target 'pending' được giao).
       if (await reviewJobRepository.hasHistory(job.id)) {
-        await reviewJobRepository.complete(job.id, {
-          findings: job.findings,
-          skillRuns: job.skillRuns,
-          costTokens: job.costTokens,
-        });
-        logger.warn('review_job_already_done_skip_rerun', { jobId: job.id, correlationId });
+        const hist = await reviewHistoryRepository.findByJobId(job.id);
+        if (hist) {
+          const proj = await projectRepository.getOwned(job.projectId, job.ownerId).catch(() => null);
+          await this.fanout(job, proj?.name ?? job.projectId, {
+            findings: hist.findings,
+            skillRuns: hist.skillRuns,
+            notes: [],
+            costTokens: hist.costTokens,
+            snapshot: hist.configSnapshot,
+          });
+          await reviewJobRepository.complete(job.id, {
+            findings: hist.findings,
+            skillRuns: hist.skillRuns,
+            costTokens: hist.costTokens,
+          });
+        } else {
+          await reviewJobRepository.complete(job.id, {
+            findings: job.findings,
+            skillRuns: job.skillRuns,
+            costTokens: job.costTokens,
+          });
+        }
+        logger.warn('review_job_already_done_redeliver', { jobId: job.id, correlationId });
         this.breaker.recordSuccess(breakerKey);
         return;
       }
@@ -143,9 +152,6 @@ export class ReviewOrchestrator {
         configSnapshot: snapshot,
         costTokens,
       });
-      await reviewJobRepository.complete(job.id, { findings, skillRuns, costTokens, truncated: ctx.truncated });
-
-      await this.postResult(job, findings, skillRuns, ctx.notes, costTokens);
       await auditRepository.append({
         ts: new Date(),
         ownerId: job.ownerId,
@@ -157,6 +163,11 @@ export class ReviewOrchestrator {
         skills: skillRuns.map((s) => s.skill),
         costTokens,
       });
+      // BUG-09: GIAO KẾT QUẢ (fan-out) TRƯỚC khi complete() — vì complete() đặt status='completed'
+      // làm job KHÔNG còn reclaim được; nếu giao sau, crash giữa 2 bước sẽ mất giao vĩnh viễn.
+      // Crash trước complete() → job vẫn 'running' → reclaim → guard hasHistory → re-fanout (idempotent).
+      await this.fanout(job, project.name, { findings, skillRuns, notes: ctx.notes, costTokens, snapshot });
+      await reviewJobRepository.complete(job.id, { findings, skillRuns, costTokens, truncated: ctx.truncated });
       this.breaker.recordSuccess(breakerKey);
     } catch (err) {
       this.breaker.recordFailure(breakerKey);
@@ -180,14 +191,8 @@ export class ReviewOrchestrator {
         prId: job.prId,
         meta: { reason: safeMsg },
       });
-      // Thông báo lỗi AN TOÀN vào thread (không stacktrace/secret).
-      await this.slack
-        .postResult({
-          channel: job.slackChannel,
-          threadTs: job.slackThreadTs,
-          summaryText: `⚠️ Review PR #${job.prId} thất bại: ${safeMsg}`,
-        })
-        .catch(() => undefined);
+      // Thông báo lỗi AN TOÀN tới MỌI target (không stacktrace/secret).
+      await this.broadcastText(job, `⚠️ Review PR #${job.prId} thất bại: ${safeMsg}`);
       logger.error('review_job_failed', { jobId: job.id, correlationId, reason: safeMsg });
     } finally {
       await this.ctxBuilder.cleanup(cloneDir); // xoá clone KỂ CẢ khi lỗi
@@ -196,76 +201,77 @@ export class ReviewOrchestrator {
 
   private async finishEmpty(job: ReviewJob, correlationId: string): Promise<void> {
     await reviewJobRepository.complete(job.id, { findings: [], skillRuns: [], costTokens: 0 });
-    await this.slack.postResult({
-      channel: job.slackChannel,
-      threadTs: job.slackThreadTs,
-      summaryText: `ℹ️ PR #${job.prId} không có file thay đổi để review.`,
-    });
+    await this.broadcastText(job, `ℹ️ PR #${job.prId} không có file thay đổi để review.`);
     logger.info('review_empty', { jobId: job.id, correlationId });
   }
 
-  private async postResult(
+  /** Gửi 1 message text tới MỌI delivery target (dùng cho lỗi/empty). */
+  private async broadcastText(job: ReviewJob, text: string): Promise<void> {
+    const targets = await this.currentTargets(job);
+    for (const t of targets) {
+      await this.slack.postText({ channel: t.channel, threadTs: t.threadTs, text }).catch(() => false);
+    }
+  }
+
+  /** Lấy delivery target mới nhất từ DB (bắt cả subscriber đăng ký muộn trước khi complete). */
+  private async currentTargets(job: ReviewJob): Promise<DeliveryTarget[]> {
+    const fresh = await reviewJobRepository.getById(job.id);
+    const targets = fresh?.deliveryTargets?.length ? fresh.deliveryTargets : job.deliveryTargets;
+    // Job i-001 cũ (không có deliveryTargets) → fallback về Slack context gốc.
+    if (!targets || targets.length === 0) {
+      return [{ channel: job.slackChannel, threadTs: job.slackThreadTs, userId: job.slackUserId, requestedAt: new Date(), status: 'pending' }];
+    }
+    return targets;
+  }
+
+  /**
+   * i-002 (ADR-012/013) — Fan-out kết quả: build file .md (1 lần) rồi giao tới MỌI target
+   * `pending`. Per-target idempotent (markTargetDelivered atomic) → reclaim KHÔNG giao trùng.
+   */
+  private async fanout(
     job: ReviewJob,
-    findings: Finding[],
-    skillRuns: SkillRunResult[],
-    notes: string[],
-    costTokens: number,
+    projectName: string,
+    data: { findings: Finding[]; skillRuns: SkillRunResult[]; notes: string[]; costTokens: number; snapshot?: ConfigSnapshot },
   ): Promise<void> {
-    const counts = severityCounts(findings);
-    // Nếu MỌI skill đều lỗi → không có review thực sự: báo cảnh báo, KHÔNG báo "✅ hoàn tất"
-    // (tránh user hiểu nhầm PR sạch khi thực chất key sai/lỗi hạ tầng). Hiển thị lý do để khắc phục.
-    const failedRuns = skillRuns.filter((s) => s.status === 'failed');
-    const allFailed = skillRuns.length > 0 && failedRuns.length === skillRuns.length;
-    const errReasons = [...new Set(failedRuns.map((s) => s.error).filter((e): e is string => !!e))];
-    const summary = [
-      allFailed
-        ? `⚠️ Review PR #${job.prId} KHÔNG hoàn tất — tất cả skill đều lỗi (commit \`${job.commitHash.slice(0, 8)}\`)`
-        : `✅ Review PR #${job.prId} hoàn tất (commit \`${job.commitHash.slice(0, 8)}\`)`,
-      `Mức độ: 🔴 ${counts.CRITICAL} CRITICAL · 🟠 ${counts.HIGH} HIGH · 🟡 ${counts.MEDIUM} MEDIUM · ⚪ ${counts.LOW} LOW`,
-      `Skill chạy: ${skillRuns.map((s) => `${s.skill}${s.status === 'failed' ? '(lỗi)' : ''}`).join(', ') || 'không có'}`,
-      ...(errReasons.length ? [`Lý do lỗi: ${errReasons.join(' | ')}`] : []),
-      ...(notes.length ? [`Ghi chú: ${notes.join(' ')}`] : []),
-      `Token ước tính: ${costTokens}`,
-      `PR: ${job.prUrl}`,
-    ].join('\n');
-
-    // Render Slack mrkdwn: heading *đậm* + emoji (Slack KHÔNG hỗ trợ ###), mỗi finding có
-    // tiêu đề đậm + 4 dòng blockquote (Tại sao/Bằng chứng/Tác động/Đề xuất). Fallback `detail` nếu thiếu.
-    const detail = SEV_ORDER.flatMap((sev) => {
-      const items = findings.filter((f) => f.severity === sev);
-      if (!items.length) return [];
-      const lines = [`\n${SEV_EMOJI[sev]} *${sev} (${items.length})*`];
-      items.forEach((f, i) => {
-        const meta = `_[${f.skill}${f.file ? ` · \`${f.file}\`` : ''}]_`;
-        lines.push(`\n*${i + 1}. ${toSlackText(f.title)}*  ${meta}`);
-        const rows: Array<[string, string | undefined]> = [
-          ['Tại sao', f.why],
-          ['Bằng chứng', f.evidence],
-          ['Tác động', f.impact],
-          ['Đề xuất', f.fix],
-        ];
-        const present = rows.filter(([, v]) => v && v.trim());
-        if (present.length) {
-          for (const [label, v] of present) lines.push(`> *${label}:* ${toSlackText(v as string)}`);
-        } else if (f.detail) {
-          lines.push(`> ${toSlackText(f.detail)}`);
-        }
-      });
-      return lines;
-    }).join('\n');
-
-    await this.slack.postResult({
-      channel: job.slackChannel,
-      threadTs: job.slackThreadTs,
-      summaryText: summary,
-      attachmentText: detail || undefined,
+    const report = buildReport(projectName, {
+      prId: job.prId,
+      prUrl: job.prUrl,
+      commitHash: job.commitHash,
+      findings: data.findings,
+      skillRuns: data.skillRuns,
+      notes: data.notes,
+      costTokens: data.costTokens,
+      configSnapshot: data.snapshot,
     });
-    await this.slack
-      .react({
-        channel: job.slackChannel,
-        timestamp: job.slackThreadTs,
-        emoji: allFailed ? 'warning' : 'white_check_mark',
-      })
-      .catch(() => undefined);
+
+    const targets = (await this.currentTargets(job)).filter((t) => t.status === 'pending');
+    const deliveries: Array<{ channel: string; threadTs: string; status: string; mode?: string }> = [];
+    for (const t of targets) {
+      const outcome = await this.deliverer.deliver(report, t.channel, t.threadTs);
+      if (outcome.ok) {
+        // Mark ATOMIC theo status=pending → reclaim sau sẽ thấy 'delivered', không giao lại.
+        const claimed = await reviewJobRepository.markTargetDelivered(job.id, t.channel, t.threadTs, outcome.mode ?? 'file');
+        if (claimed) {
+          await auditRepository.append({
+            ts: new Date(), ownerId: job.ownerId, actor: job.slackUserId, action: 'review.delivered',
+            projectId: job.projectId, prId: job.prId, meta: { channel: t.channel, mode: outcome.mode },
+          });
+          deliveries.push({ channel: t.channel, threadTs: t.threadTs, status: 'delivered', mode: outcome.mode });
+        }
+        await this.slack
+          .react({ channel: t.channel, timestamp: t.threadTs, emoji: report.allFailed ? 'warning' : 'white_check_mark' })
+          .catch(() => undefined);
+      } else {
+        await reviewJobRepository.markTargetFailed(job.id, t.channel, t.threadTs, outcome.error ?? 'unknown');
+        await auditRepository.append({
+          ts: new Date(), ownerId: job.ownerId, actor: job.slackUserId, action: 'review.delivery_failed',
+          projectId: job.projectId, prId: job.prId, meta: { channel: t.channel, reason: outcome.error },
+        });
+        deliveries.push({ channel: t.channel, threadTs: t.threadTs, status: 'failed' });
+        logger.error('delivery_failed', { jobId: job.id, channel: t.channel, reason: outcome.error });
+      }
+    }
+    // i-002 (T13): ghi deliveries vào history để Admin UI hiển thị (không chứa nội dung/secret).
+    await reviewHistoryRepository.recordDeliveries(job.id, deliveries).catch(() => undefined);
   }
 }

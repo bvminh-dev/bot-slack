@@ -30,7 +30,7 @@ export function chunkByLines(text: string, max: number): string[] {
   return chunks;
 }
 
-async function slackCall(method: string, payload: Record<string, unknown>): Promise<void> {
+async function slackCall(method: string, payload: Record<string, unknown>): Promise<boolean> {
   const cfg = loadConfig();
   try {
     const res = await fetch(`https://slack.com/api/${method}`, {
@@ -43,8 +43,31 @@ async function slackCall(method: string, payload: Record<string, unknown>): Prom
     });
     const data = (await res.json()) as { ok?: boolean; error?: string };
     if (!data.ok) logger.warn('slack_api_error', { method, error: data.error });
+    return data.ok === true;
   } catch {
     logger.warn('slack_api_call_failed', { method });
+    return false;
+  }
+}
+
+/** Gọi Slack API dạng form-urlencoded; trả data thô (cho luồng upload external). */
+async function slackForm(method: string, params: Record<string, string>): Promise<Record<string, unknown> | null> {
+  const cfg = loadConfig();
+  try {
+    const res = await fetch(`https://slack.com/api/${method}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${cfg.slackBotToken}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams(params).toString(),
+    });
+    const data = (await res.json()) as Record<string, unknown>;
+    if (data.ok !== true) logger.warn('slack_api_error', { method, error: String(data.error) });
+    return data;
+  } catch {
+    logger.warn('slack_api_call_failed', { method });
+    return null;
   }
 }
 
@@ -66,5 +89,43 @@ export const slackPort: ISlackPort = {
 
   async react({ channel, timestamp, emoji }) {
     await slackCall('reactions.add', { channel, timestamp, name: emoji });
+  },
+
+  async postText({ channel, threadTs, text }) {
+    return slackCall('chat.postMessage', { channel, thread_ts: threadTs, text });
+  },
+
+  // i-002 (ADR-012) — upload .md qua luồng external 2 bước. Chỉ true khi bước cuối OK.
+  async uploadMarkdown({ channel, threadTs, filename, content, initialComment }) {
+    const cfg = loadConfig();
+    const bytes = Buffer.from(content, 'utf8');
+    // B1: xin upload URL.
+    const urlRes = await slackForm('files.getUploadURLExternal', {
+      filename,
+      length: String(bytes.byteLength),
+    });
+    const uploadUrl = urlRes && typeof urlRes.upload_url === 'string' ? urlRes.upload_url : null;
+    const fileId = urlRes && typeof urlRes.file_id === 'string' ? urlRes.file_id : null;
+    if (!uploadUrl || !fileId) return false;
+    // B2: PUT bytes lên upload URL.
+    try {
+      const put = await fetch(uploadUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/markdown' },
+        body: bytes,
+      });
+      if (!put.ok) return false;
+    } catch {
+      logger.warn('slack_upload_put_failed', { filename });
+      return false;
+    }
+    // B3: hoàn tất + share vào thread (kèm tóm tắt). CHỈ true khi bước này OK.
+    const done = await slackForm('files.completeUploadExternal', {
+      files: JSON.stringify([{ id: fileId, title: filename }]),
+      channel_id: channel,
+      thread_ts: threadTs,
+      ...(initialComment ? { initial_comment: initialComment } : {}),
+    });
+    return !!done && done.ok === true;
   },
 };

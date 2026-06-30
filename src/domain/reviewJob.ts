@@ -30,6 +30,25 @@ export interface SkillRunResult {
   costTokens?: number;
 }
 
+// i-002 (ADR-013): fan-out — mỗi nơi cần trả kết quả = 1 DeliveryTarget trên job.
+export type DeliveryStatus = 'pending' | 'delivered' | 'failed';
+export type DeliveryMode = 'file' | 'chat' | 'cache';
+
+export interface DeliveryTarget {
+  channel: string;
+  threadTs: string;
+  userId: string; // người gõ lệnh (audit; không serialize thừa ra ngoài)
+  requestedAt: Date;
+  status: DeliveryStatus;
+  mode?: DeliveryMode; // cách đã giao thành công
+  deliveredAt?: Date;
+  error?: string;
+}
+
+export function makeDeliveryTarget(channel: string, threadTs: string, userId: string, at: Date): DeliveryTarget {
+  return { channel, threadTs, userId, requestedAt: at, status: 'pending' };
+}
+
 /** Snapshot cấu hình tại thời điểm start (tech Source of Truth/Temporal). */
 export interface ConfigSnapshot {
   model: string;
@@ -63,13 +82,28 @@ export interface ReviewJob {
   costTokens: number;
   truncated?: { files?: number; diffLines?: number }; // báo cắt do giới hạn
   error?: string;
-  supersedesJobId?: string; // review lại cùng commit
+  supersedesJobId?: string; // review lại cùng commit — bản này thay bản nào (i-001)
+  supersededByJobId?: string; // i-002: bản này đã bị bản nào thay (loại khỏi cache-serve)
+  completedAt?: Date; // i-002: thời điểm hoàn tất (chọn bản cache mới nhất + stale note)
+  deliveryTargets: DeliveryTarget[]; // i-002 (ADR-013): fan-out tới mọi nơi đã hỏi
   createdAt: Date;
   updatedAt: Date;
 }
 
 export function makeIdempotencyKey(projectId: string, prId: string, commitHash: string): string {
   return `${projectId}:${prId}:${commitHash}`;
+}
+
+/**
+ * i-002 (ADR-014): job có "đủ điều kiện cache-serve" không.
+ * Hợp lệ = đã `completed`, CHƯA bị superseded, và KHÔNG phải lỗi-toàn-phần
+ * (có ≥1 skill chạy xong). Job `failed`/mọi-skill-fail/superseded → KHÔNG serve lại.
+ */
+export function isCacheEligible(job: Pick<ReviewJob, 'status' | 'supersededByJobId' | 'skillRuns'>): boolean {
+  if (job.status !== 'completed') return false;
+  if (job.supersededByJobId) return false;
+  if (job.skillRuns.length === 0) return false; // vd PR rỗng — chạy lại (rẻ)
+  return job.skillRuns.some((s) => s.status === 'completed');
 }
 
 export function severityCounts(findings: Finding[]): Record<Severity, number> {

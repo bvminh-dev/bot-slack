@@ -49,6 +49,8 @@ async function ensureIndexes(database: Db): Promise<void> {
     },
     { key: { ownerId: 1 } },
     { key: { projectId: 1, createdAt: -1 } },
+    // i-002: cache-serve theo khóa (bản completed mới nhất chưa superseded).
+    { key: { idempotencyKey: 1, status: 1, completedAt: -1 }, name: 'cache_lookup' },
   ]);
 
   // audit + history: truy vết theo owner/project.

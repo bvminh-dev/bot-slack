@@ -2,8 +2,8 @@
 doc: security
 title: Security Baseline — tieu-nhi (Slack bot review PR Azure)
 status: living
-updated: 2026-06-25
-sources: [i-001]
+updated: 2026-06-30
+sources: [i-001, i-002]
 ---
 
 # Security Baseline — Trạng thái bảo mật hợp nhất
@@ -18,6 +18,8 @@ sources: [i-001]
 | Định danh owner | Azure **userId/email** từ profile API (ổn định khi PAT xoay vòng), không dùng chuỗi PAT làm khoá | i-001 (#2) |
 | Tạo project | **Self-service** — bất kỳ PAT Azure hợp lệ; KHÔNG allowlist; bù bằng rate-limit + quota + audit | i-001 (#2) |
 | Slack review authz | **Mọi người trong workspace** review mọi project; residual data-leakage chéo **được chấp nhận**; giữ điểm chốt `authorizeReviewCommand` | i-001 (#8) |
+| Fan-out & cache-serve authz | `authorizeReviewCommand` áp cho **mọi entrypoint**: review + **subscribe** + **cache-serve** + **`fresh`**; cache-serve đọc theo **khóa resolve** (không jobId tự do → tránh BOLA); delivery target lấy từ **Slack event đã verify** (không từ payload tự do). Fan-out **không cấp quyền mới** → khuếch đại residual #8, **chấp nhận** | i-002 |
+| Giao file `.md` ra Slack | Output rời hệ thống **không xoá được từ bot** → **best-effort redaction secret-pattern + minimization + classification** trong builder trước upload; Slack Bot Token thêm scope **`files:write`** (least-privilege, bảo vệ như secret) | i-002 |
 
 ## 2. Nguyên tắc bảo mật bắt buộc (cross-cutting)
 
@@ -32,7 +34,7 @@ sources: [i-001]
 
 ## 3. Tài sản nhạy cảm (hệ thống)
 
-CRITICAL: Azure PAT & Claude API key (per project, AES-256-GCM), master key (ENV). HIGH: PAT login (không lưu), session JWT, Slack signing secret, PR code/tài liệu khách hàng (qua Anthropic), review history. MEDIUM: owner identity (PII), project config, audit log.
+CRITICAL: Azure PAT & Claude API key (per project, AES-256-GCM), master key (ENV). HIGH: PAT login (không lưu), session JWT, Slack signing secret, PR code/tài liệu khách hàng (qua Anthropic), review history, **(i-002) file `.md` báo cáo đã upload lên Slack (rời hệ thống)**, **(i-002) Slack Bot Token có `files:write`**. MEDIUM: owner identity (PII), project config, audit log, **(i-002) deliveryTargets (channel/userId — PII routing)**.
 
 ## 4. Rủi ro/residual nổi bật (toàn hệ thống)
 
@@ -41,6 +43,9 @@ CRITICAL: Azure PAT & Claude API key (per project, AES-256-GCM), master key (ENV
 - `[HIGH] (residual chấp nhận)` Slack "mọi người review" → lộ code/tài liệu project chéo qua thread; bù audit + cảnh báo owner.
 - `[HIGH]` Code khách hàng đi qua Anthropic (bên thứ ba) — minimization + đồng ý hợp đồng (FRD #7, → nghiệp vụ).
 - `[HIGH]` Prompt injection từ nội dung PR — đóng khung untrusted + tool tối thiểu.
+- `[HIGH] (i-002)` File `.md` rời lên Slack **không xoá được từ bot** → redaction secret-pattern + minimization trước upload; runbook IR xoá file lộ secret + toggle "chat-only".
+- `[HIGH] (i-002, residual chấp nhận)` Fan-out + cache-serve khuếch đại lộ chéo (không cấp quyền mới) → `authorizeReviewCommand` mọi entrypoint + cap deliveryTargets + audit/alert.
+- `[MEDIUM] (i-002)` Mention injection (`<!channel>`/`@here`) từ snippet PR vào chunked chat fallback → vô hiệu mention; ưu tiên file (không bị parse mention). DoS/cost: rate-limit bao gồm `fresh`.
 
 ## 5. Định tuyến / khuyến nghị mở (không chặn)
 

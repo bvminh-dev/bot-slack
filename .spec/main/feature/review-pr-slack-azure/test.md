@@ -2,8 +2,8 @@
 feature: review-pr-slack-azure
 stage: test
 status: approved
-source: i-001
-updated: 2026-06-26
+source: [i-001, i-002]
+updated: 2026-06-30
 ---
 
 # Phân Tích Requirement
@@ -32,7 +32,7 @@ SC-1 happy path; SC-2 PR chỉ tài liệu→skill nghiệp vụ/kiến trúc; S
 | TC-11/12/13 | Tạo project secret+model | model hợp lệ/rỗng/lạ | OK (secret ẩn, test-conn trước lưu); rỗng→default; lạ→chặn | Use Case/Decision |
 | TC-14 | GET project có secret | — | Trả cờ "đã cấu hình", KHÔNG trả secret | Security |
 | TC-15 | Owner B GET project A | session B | **404**, không lộ tồn tại | BOLA |
-| TC-16 | Gõ lại cùng PR/commit đang chạy | cùng lệnh | Không job mới; báo "đang chạy" | Concurrency |
+| TC-16 | Gõ lại cùng PR/commit đang chạy | cùng lệnh | Không job mới; báo "đang chạy" | Concurrency | <br>**> [i-002] OVERRIDE TC-16:** lệnh trùng lúc đang chạy KHÔNG còn "đang chạy/reject" mà **register delivery target + ack chờ**, fan-out khi xong (xem TC-204 i-002). |
 | TC-17 | 6 lệnh khác project | 6 job | ≤5 song song; thứ 6 xếp hàng | Risk-Based |
 | TC-18/19 | PR 60 file / 6 lệnh/10’ | — | Cắt 50 file+báo; thứ 6 bị rate-limit | BVA |
 | TC-20 | PR rỗng | 0 file | "không có gì để review" | Edge |
@@ -169,7 +169,65 @@ Lỗ hổng spec (không chặn): #9 tên project, token tối đa/PR, retention
 | Dòng lịch sử | `review-history-row-{jobId}` | Detail | commit hash + severity |
 | Badge trạng thái | `review-status-badge-{jobId}` | Detail | Queued/Running/Completed/Failed |
 | Thông báo 404/từ chối | `access-denied-msg` | Mọi trang | đồng nhất |
+| (i-002) Badge giao theo target | `delivery-status-{jobId}` | Detail | delivered/failed + mode (file/chat/cache) |
+| (i-002) Danh sách delivery targets | `delivery-targets-list-{jobId}` | Detail | channel/thread/time; không lộ userId thừa |
+| (i-002) Badge superseded | `superseded-badge-{jobId}` | Detail | bản cũ bị `fresh` thay |
+| (i-002) Link bản hiện hành | `superseded-by-link-{jobId}` | Detail | điều hướng bản mới |
+| (i-002) Chỉ báo cache-hit | `cache-hit-indicator-{jobId}` | Detail | phân biệt run mới vs cache-serve |
+| (i-002) Filter trạng thái giao | `filter-delivery-status` | Detail toolbar | delivered/failed |
+| (i-002) Nút xem report (.md) | `view-report-btn-{jobId}` | Detail | nội dung dựng từ History |
 </content>
+
+---
+
+# [i-002] Delta — Giao kết quả review (test design)
+
+> Nguồn: `i-002/test.md`. Phủ phần MỚI/đổi của i-002 (file `.md`/fallback/fan-out/cache-serve/`fresh`/redaction). Test case `TC-2xx`. Phần Test Pyramid (Unit/Functional/E2E) cho i-002 sẽ append ở `/tn-sinh-test i-002`.
+
+## Test Cases (delta)
+
+| ID | Tiền điều kiện | Bước | Dữ liệu | Kết quả mong đợi | Kỹ thuật |
+|----|----------------|------|---------|------------------|----------|
+| TC-201 | PR có ≥1 finding | Gõ lệnh, chờ kết quả | `@tieu-nhi LMS review .../123` | Upload **1 file** `review-LMS-PR123-<commit8>.md` + **1 dòng tóm tắt** (severity+link+commit) | Use Case |
+| TC-202 | Upload Slack lỗi | Ép upload fail | mock complete lỗi | **Fallback** chunk mrkdwn <~3000 ký tự + chú thích "gửi dạng chat" | Error Guessing |
+| TC-203 | Upload + chat đều fail | Ép cả 2 fail | — | `delivery_failed`+alert; KHÔNG báo hoàn tất sai | Negative |
+| TC-204 | Job running, có target#1 | Gõ trùng khóa từ thread#2,#3 | cùng `(LMS,123,c8)` | Cả 3 thread nhận file khi xong (fan-out) | Use Case |
+| TC-205 | 3 target, #1 delivered | Worker crash→reclaim | — | Reclaim chỉ giao #2,#3; #1 KHÔNG post lại | State Transition |
+| TC-206 | Chưa có job | 2 lệnh cùng khóa đồng thời | song song | Đúng 1 job + 1 target (atomic upsert) | Concurrency |
+| TC-207 | Khóa đã completed hợp lệ | Gõ lệnh (không fresh) | — | Cache-serve từ History; **0 token**; chú thích commit+time+gợi ý fresh | Decision Table |
+| TC-208 | Job gần nhất `failed` | Gõ lệnh | — | KHÔNG serve lỗi; chạy review mới | Decision Table |
+| TC-209 | 2 bản completed (B supersedes A) | Cache-serve | — | Trả bản B (chưa superseded) | Decision Table |
+| TC-210 | Khóa completed | Gõ `fresh` | `...123 fresh` | Job mới; cũ `supersededByJobId`; mới `supersedesJobId` | Use Case |
+| TC-211 | Job running | Gõ `fresh` | — | Không nhân đôi; register + ack | Concurrency |
+| TC-212 | Completed @c8, có commit c9 | Gõ lệnh thường | — | Khóa mới (LMS,123,c9) → review mới | EP |
+| TC-213 | Job 50 target | Subscriber 51 | — | Ack "ở thread gốc"; không phình | BVA |
+| TC-214 | Cùng channel+thread đã là target | Gõ trùng | — | Không thêm target trùng; ack lại | EP |
+| TC-215 | Report chứa secret-pattern | Build report | `sk-ant-`/`AKIA`/`password=` | File `.md` **redact** trước upload | Security |
+| TC-216 | Snippet PR chứa mention | Fallback chunk | `<!channel>`,`@here` | Mention **vô hiệu**; link không auto-render | Security |
+| TC-217 | Bot kick khỏi channel#2 | Fan-out 3 target | — | #1,#3 OK; #2 failed, không chặn còn lại | Integration |
+| TC-218 | Slack retry event | 2 webhook giống nhau | cùng event id | 1 target (idempotent theo key,channel,thread) | Concurrency |
+| TC-219 | File `.md` vượt giới hạn Slack | Upload | file lớn | Chia/fallback; không fail câm | BVA |
+| TC-220 | Cache-serve | Đọc kết quả | khóa resolve | Đọc theo **khóa resolve**, không jobId tự do (BOLA) | Security |
+
+## Định tuyến (Decision Table delta)
+
+| Rule | Job đang chạy? | Completed hợp lệ? | `fresh`? | Hành động |
+|------|----------------|-------------------|----------|-----------|
+| R1 | N | N | N | Enqueue job mới |
+| R2 | Y | - | N | Register target + ack chờ |
+| R3 | N | Y | N | Cache-serve (0 token) |
+| R4 | N | Y | Y | Enqueue job mới `supersedes` |
+| R5 | Y | - | Y | Register (không nhân đôi) |
+| R6 | N | chỉ failed/lỗi-toàn-phần | N | Enqueue job mới (không serve lỗi) |
+
+## Dự đoán bug trọng yếu (delta)
+- `[CRITICAL]` Upsert không atomic → 2 job/khóa (double token). `[CRITICAL]` Quên authorize ở subscribe/cache-serve → bypass.
+- `[HIGH]` Mark delivered trước khi upload OK → lost delivery khi reclaim. `[HIGH]` Cache trả nhầm superseded/failed. `[HIGH]` Redaction sót → secret rời lên Slack.
+- `[MEDIUM]` deliveryTargets không dedup → post trùng. `[MEDIUM]` mention không neutralize → ping toàn workspace.
+
+## Regression cần cập nhật từ i-001
+- **TC-16 / FT-16 / E2E-07** (double-submit "đang chạy") → đổi kỳ vọng thành **subscribe + fan-out** (không reject).
+- **Output Slack** (TC-01 tóm tắt+đính kèm) → đổi thành **luôn file `.md` + tóm tắt inline**.
 
 ---
 
@@ -317,3 +375,33 @@ Lỗ hổng spec (không chặn): #9 tên project, token tối đa/PR, retention
 - `[LOW]` **Retention/purge history & audit** chưa có số cụ thể → chưa đặt case; test theo giá trị mặc định cấu hình khi chốt.
 - `[Khử trùng lặp — OK]` Biên file/diff/rate-limit kiểm cạnh ở Unit (UT-17..20), Functional chỉ xác nhận hiệu lực end-to-end (FT-32,33,34) — không lặp từng cạnh. Map file→skill liệt kê R1–R7 ở Unit (UT-08..14), F/E2E chỉ luồng đại diện (FT-38). Đúng nguyên tắc pyramid.
 - `[Hình dạng — OK]` E2E 7 case (12%) < Functional 19 (34%) < Unit 30 (54%): pyramid khỏe mạnh, không "ice-cream cone". E2E giới hạn đúng cho bảo mật/tenant isolation/secret/happy path.
+
+---
+
+# [i-002] Phân Tầng Test Case (Test Pyramid) — Delta giao kết quả review
+
+> Nguồn: `i-002/test.md`. Phủ phần MỚI/đổi i-002 (file `.md`/fallback/fan-out/cache-serve/`fresh`/redaction). ID `UT-2xx/FT-2xx/E2E-2xx`.
+
+## Tổng Quan Kim Tự Tháp (i-002)
+| Tầng | Số case | Tỉ lệ | Ghi chú |
+|------|---------|-------|---------|
+| Unit | 18 | 41% | filename/report/summary, redaction, neutralize mention, chunk, parse fresh, cache-eligible, route R1–R6, dedup/cap, status transition |
+| Functional | 19 | 43% | atomic upsert/register/fan-out/reclaim, cache-serve vs failed/superseded, fresh/supersedes, fallback file→chat→fail, authorize bypass, BOLA, audit |
+| E2E | 7 | 16% | UI Admin (deliveries/superseded/cache-hit/filter) + luồng Slack đầu-cuối (fan-out, cache-serve, fallback+reclaim) |
+
+> **Hình dạng:** delta i-002 thiên về tích hợp/đồng thời (atomic upsert, fan-out, reclaim, cache-serve qua DB) → Functional nhỉnh hơn Unit; E2E vẫn nhỏ nhất (16%), không ice-cream cone. Gộp i-001 (54/34/12%) tổng thể vẫn khỏe mạnh.
+
+## Unit (i-002) — tóm tắt
+UT-201 buildReportFilename · UT-202 sanitizeFilename (path traversal) · UT-203 buildMarkdownReport · UT-204 buildSummaryLine (mrkdwn) · UT-205 redactSecrets · UT-206 neutralizeMentions · UT-207 chunkMrkdwn · UT-208 parseFreshFlag · UT-209 buildIdempotencyKey commit-aware · UT-210 isCacheEligible · UT-211 selectLatestNonSuperseded · UT-212 routeCommand R1–R6 · UT-213 dedupTarget · UT-214 withinTargetCap · UT-215 targetStatusTransition (idempotent) · UT-216 pickDeliveryMode · UT-217 buildStaleNote · UT-218 isFileWithinSlackLimit. *(chi tiết: `i-002/test.md`)*
+
+## Functional (i-002) — tóm tắt
+FT-201 atomic upsert (1 job+1 target) · FT-202 register khi running · FT-203 fan-out giao mọi target · FT-204 reclaim idempotent · FT-205 cache-serve 0-token · FT-206 loại job failed · FT-207 bản chưa superseded · FT-208 fresh→supersedes · FT-209 fresh khi running · FT-210 commit-aware · FT-211 fallback file→chat · FT-212 cả 2 fail→delivery_failed+alert · FT-213 bot kick channel · FT-214 Slack retry idempotent · FT-215 file vượt giới hạn · FT-216 authorize mọi entrypoint · FT-217 BOLA cache theo khóa · FT-218 rate-limit gồm fresh · FT-219 Admin /reviews deliveries · FT-220 audit delivery/cache/rerun. *(chi tiết: `i-002/test.md`)*
+
+## E2E (i-002) — tóm tắt
+E2E-201 fan-out đầu-cuối (không-DOM) · E2E-202 cache-serve (không-DOM) · E2E-203 fallback+reclaim (không-DOM) · E2E-204 Admin UI trạng thái giao (`delivery-status`/`delivery-targets-list`) · E2E-205 superseded (`superseded-badge`/`superseded-by-link`) · E2E-206 cache-hit+report (`cache-hit-indicator`/`view-report-btn`) · E2E-207 filter (`filter-delivery-status`). *(chi tiết: `i-002/test.md`)*
+
+## Khoảng trống (i-002)
+- `[MEDIUM]` Độ chính xác redaction (false-negative) → cần bộ dữ liệu mẫu secret + UT data-driven khi chốt pattern ở `/tn-code`.
+- `[MEDIUM]` Hiệu năng fan-out cap-max (50 target, Slack 429) → load/timing test riêng.
+- `[MEDIUM]` Giới hạn kích thước file Slack → cố định boundary khi chốt số ở `/tn-code`.
+- **Không có khoảng trống CRITICAL** — mọi yêu cầu i-002 (gồm authorize/BOLA/redaction/mention) có ≥1 tầng phủ.

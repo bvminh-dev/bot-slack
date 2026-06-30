@@ -72,4 +72,20 @@ export interface ISlackPort {
     attachmentText?: string; // khi quá dài → đính kèm
   }): Promise<void>;
   react(opts: { channel: string; timestamp: string; emoji: string }): Promise<void>;
+
+  // i-002 (T5, ADR-012) — giao kết quả dạng file .md + fallback chunk chat.
+  /**
+   * Upload file `.md` qua luồng external 2 bước (getUploadURLExternal → PUT → completeUploadExternal).
+   * `files.upload` đã bị Slack KHAI TỬ. Trả `true` CHỈ khi completeUploadExternal OK
+   * (lỗi giữa 2 bước = coi như CHƯA giao → caller fallback chat).
+   */
+  uploadMarkdown(opts: {
+    channel: string;
+    threadTs: string;
+    filename: string;
+    content: string;
+    initialComment?: string;
+  }): Promise<boolean>;
+  /** Post 1 message; trả `true` nếu Slack `ok`. Dùng cho tóm tắt + fallback chunk. */
+  postText(opts: { channel: string; threadTs: string; text: string }): Promise<boolean>;
 }

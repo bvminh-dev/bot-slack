@@ -21,6 +21,9 @@ export interface ReviewHistoryItem {
   status: string;
   severityCounts: { CRITICAL: number; HIGH: number; MEDIUM: number; LOW: number };
   createdAt: string;
+  // i-002 (T13/T14): trạng thái giao + lineage supersede (không chứa userId/secret thừa).
+  deliveries?: Array<{ channel: string; threadTs: string; status: string; mode?: string }>;
+  supersededByJobId?: string;
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {

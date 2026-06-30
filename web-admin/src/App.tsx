@@ -245,33 +245,103 @@ function ProjectForm({ id, onDone }: { id?: string; onDone: () => void }) {
   );
 }
 
+// i-002: tổng hợp trạng thái giao của 1 review từ danh sách delivery target.
+function deliverySummary(it: ReviewHistoryItem): { label: string; failed: boolean; modes: string } {
+  const d = it.deliveries ?? [];
+  if (d.length === 0) return { label: '—', failed: false, modes: '' };
+  const failed = d.some((x) => x.status === 'failed');
+  const modes = [...new Set(d.map((x) => x.mode).filter(Boolean))].join('/');
+  return { label: failed ? `lỗi (${d.length})` : `đã giao (${d.length})`, failed, modes };
+}
+
 function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const [items, setItems] = useState<ReviewHistoryItem[]>([]);
   const [error, setError] = useState('');
+  const [filter, setFilter] = useState<'all' | 'delivered' | 'failed'>('all');
   useEffect(() => {
     api.reviews(id).then((p) => setItems(p.items)).catch((e) => setError(String(e.message)));
   }, [id]);
+
+  const visible = items.filter((it) => {
+    if (filter === 'all') return true;
+    const s = deliverySummary(it);
+    return filter === 'failed' ? s.failed : !s.failed && (it.deliveries?.length ?? 0) > 0;
+  });
+
   return (
     <section>
       <button onClick={onBack}>← Quay lại</button>
       <h2>Lịch sử review</h2>
       {error && <p data-testid="access-denied-msg" style={{ color: 'crimson' }}>{error}</p>}
+      <div style={{ margin: '8px 0' }}>
+        <label style={{ fontSize: 13, color: '#555' }}>Lọc trạng thái giao:{' '}
+          <select
+            data-testid="filter-delivery-status"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value as 'all' | 'delivered' | 'failed')}
+          >
+            <option value="all">Tất cả</option>
+            <option value="delivered">Đã giao</option>
+            <option value="failed">Giao lỗi</option>
+          </select>
+        </label>
+      </div>
       <table data-testid="review-history-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>
-          <tr><th>PR</th><th>Commit</th><th>Trạng thái</th><th>Mức độ</th><th>Lúc</th></tr>
+          <tr><th>PR</th><th>Commit</th><th>Trạng thái</th><th>Giao</th><th>Mức độ</th><th>Lúc</th><th></th></tr>
         </thead>
         <tbody>
-          {items.map((it) => (
-            <tr key={it.jobId} data-testid={`review-history-row-${it.jobId}`}>
-              <td>#{it.prId}</td>
-              <td><code>{it.commitHash.slice(0, 8)}</code></td>
-              <td><span data-testid={`review-status-badge-${it.jobId}`}>{it.status}</span></td>
-              <td>
-                🔴{it.severityCounts.CRITICAL} 🟠{it.severityCounts.HIGH} 🟡{it.severityCounts.MEDIUM} ⚪{it.severityCounts.LOW}
-              </td>
-              <td>{new Date(it.createdAt).toLocaleString()}</td>
-            </tr>
-          ))}
+          {visible.map((it) => {
+            const d = deliverySummary(it);
+            const isCacheHit = (it.deliveries ?? []).some((x) => x.mode === 'cache');
+            return (
+              <tr key={it.jobId} data-testid={`review-history-row-${it.jobId}`}>
+                <td>#{it.prId}</td>
+                <td><code>{it.commitHash.slice(0, 8)}</code></td>
+                <td>
+                  <span data-testid={`review-status-badge-${it.jobId}`}>{it.status}</span>
+                  {it.supersededByJobId && (
+                    <>
+                      {' '}
+                      <span data-testid={`superseded-badge-${it.jobId}`} title="Đã bị bản fresh thay" style={{ color: '#999' }}>
+                        ↩︎ superseded
+                      </span>{' '}
+                      <a data-testid={`superseded-by-link-${it.jobId}`} href={`#job-${it.supersededByJobId}`}>
+                        → bản mới
+                      </a>
+                    </>
+                  )}
+                  {isCacheHit && (
+                    <span data-testid={`cache-hit-indicator-${it.jobId}`} title="Đã phục vụ lại từ DB" style={{ color: '#2a7' }}>
+                      {' '}♻︎ cache
+                    </span>
+                  )}
+                </td>
+                <td>
+                  <span
+                    data-testid={`delivery-status-${it.jobId}`}
+                    style={{ color: d.failed ? 'crimson' : '#2a7' }}
+                  >
+                    {d.label}{d.modes ? ` · ${d.modes}` : ''}
+                  </span>
+                  <ul data-testid={`delivery-targets-list-${it.jobId}`} style={{ margin: 0, paddingLeft: 16, fontSize: 12 }}>
+                    {(it.deliveries ?? []).map((x, i) => (
+                      <li key={i}>{x.channel} · {x.status}{x.mode ? ` (${x.mode})` : ''}</li>
+                    ))}
+                  </ul>
+                </td>
+                <td>
+                  🔴{it.severityCounts.CRITICAL} 🟠{it.severityCounts.HIGH} 🟡{it.severityCounts.MEDIUM} ⚪{it.severityCounts.LOW}
+                </td>
+                <td>{new Date(it.createdAt).toLocaleString()}</td>
+                <td>
+                  <a data-testid={`view-report-btn-${it.jobId}`} href={it.prUrl} target="_blank" rel="noreferrer">
+                    Xem
+                  </a>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </section>

@@ -6,10 +6,12 @@ import { parseCommand } from './commandParser';
 import { RateLimiter } from './rateLimiter';
 import { projectRepository } from '../adapters/mongo/projectRepository';
 import { reviewJobRepository } from '../adapters/mongo/reviewJobRepository';
+import { reviewHistoryRepository } from '../adapters/mongo/reviewHistoryRepository';
 import { auditRepository } from '../adapters/mongo/auditRepository';
 import { decryptSecret } from '../adapters/crypto/secretCrypto';
-import { makeIdempotencyKey } from '../domain/reviewJob';
+import { makeDeliveryTarget, makeIdempotencyKey, ReviewJob } from '../domain/reviewJob';
 import { RateLimitError, ValidationError } from '../domain/errors';
+import { loadConfig } from '../config/env';
 import { logger } from '../observability/logger';
 
 export interface SlackCommandContext {
@@ -19,9 +21,12 @@ export interface SlackCommandContext {
   text: string;
 }
 
+// i-002 (ADR-013/014): lệnh trùng KHÔNG còn bị reject — đăng ký fan-out hoặc cache-serve.
 export type CommandResult =
   | { kind: 'queued'; prId: string; project: string }
-  | { kind: 'duplicate'; prId: string }
+  | { kind: 'subscribed'; prId: string; project: string } // đăng ký vào job đang chạy (ack chờ)
+  | { kind: 'cache'; prId: string; project: string; cachedJob: ReviewJob } // trả từ History (0 token)
+  | { kind: 'cap_reached'; prId: string } // PR "hot" vượt cap target
   | { kind: 'rejected'; reason: string };
 
 /**
@@ -70,27 +75,9 @@ export class ReviewCommandService {
       return { kind: 'rejected', reason: 'Link PR không thuộc repo của project (mismatch).' };
     }
     const commitHash = pr.lastCommitHash || 'unknown';
-
+    const key = makeIdempotencyKey(project.id, parsed.prId, commitHash);
     const now = new Date();
-    const enq = await reviewJobRepository.enqueue({
-      projectId: project.id,
-      ownerId: project.ownerId,
-      prId: parsed.prId,
-      commitHash,
-      idempotencyKey: makeIdempotencyKey(project.id, parsed.prId, commitHash),
-      slackChannel: ctx.channel,
-      slackThreadTs: ctx.threadTs,
-      slackUserId: ctx.userId,
-      prUrl: parsed.prUrl,
-      status: 'queued',
-      availableAt: now,
-      attempts: 0,
-      findings: [],
-      skillRuns: [],
-      costTokens: 0,
-      createdAt: now,
-      updatedAt: now,
-    });
+    const cap = loadConfig().deliveryTargetCap;
 
     await auditRepository.append({
       ts: now,
@@ -100,13 +87,86 @@ export class ReviewCommandService {
       projectId: project.id,
       prId: parsed.prId,
       commitHash,
+      meta: { fresh: parsed.fresh },
     });
 
-    if (enq.status === 'duplicate') {
-      logger.info('review_duplicate', { projectId: project.id, prId: parsed.prId });
-      return { kind: 'duplicate', prId: parsed.prId };
+    // i-002 (ADR-014): cache-serve — khóa đã có bản completed HỢP LỆ & KHÔNG `fresh` → trả từ DB (0 token).
+    if (!parsed.fresh) {
+      const cached = await reviewJobRepository.findCacheEligibleByKey(key);
+      if (cached) {
+        await auditRepository.append({
+          ts: new Date(), ownerId: project.ownerId, actor: ctx.userId,
+          action: 'review.cache_hit', projectId: project.id, prId: parsed.prId, commitHash,
+        });
+        logger.info('review_cache_hit', { projectId: project.id, prId: parsed.prId });
+        return { kind: 'cache', prId: parsed.prId, project: project.name, cachedJob: cached };
+      }
     }
-    return { kind: 'queued', prId: parsed.prId, project: project.name };
+
+    const target = makeDeliveryTarget(ctx.channel, ctx.threadTs, ctx.userId, now);
+    const jobData = {
+      projectId: project.id,
+      ownerId: project.ownerId,
+      prId: parsed.prId,
+      commitHash,
+      idempotencyKey: key,
+      slackChannel: ctx.channel,
+      slackThreadTs: ctx.threadTs,
+      slackUserId: ctx.userId,
+      prUrl: parsed.prUrl,
+      status: 'queued' as const,
+      availableAt: now,
+      attempts: 0,
+      findings: [],
+      skillRuns: [],
+      costTokens: 0,
+      deliveryTargets: [target],
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    // i-002 (ADR-013): enqueue-or-subscribe ATOMIC. Trùng lúc đang chạy → đăng ký target + fan-out.
+    // BUG-10: xử lý `race_none` TƯỜNG MINH (retry tối đa 2 lần), KHÔNG để lọt vào nhánh 'subscribed'.
+    let enq = await reviewJobRepository.enqueueOrSubscribe(jobData, cap);
+    for (let attempt = 0; enq.status === 'race_none' && attempt < 2; attempt++) {
+      // Job vừa rời active (completed/failed) giữa chừng: thử cache, không có thì enqueue lại.
+      if (!parsed.fresh) {
+        const cached = await reviewJobRepository.findCacheEligibleByKey(key);
+        if (cached) return { kind: 'cache', prId: parsed.prId, project: project.name, cachedJob: cached };
+      }
+      enq = await reviewJobRepository.enqueueOrSubscribe(jobData, cap);
+    }
+    if (enq.status === 'race_none') {
+      // Vẫn đua sau khi thử lại → KHÔNG ack "đang xử lý" giả; báo bận để người dùng gõ lại.
+      logger.warn('review_enqueue_race_unsettled', { projectId: project.id, prId: parsed.prId });
+      return { kind: 'rejected', reason: 'Hệ thống đang bận xử lý PR này, vui lòng thử lại sau giây lát.' };
+    }
+
+    if (enq.status === 'queued') {
+      // `fresh` trên khóa đã completed → đánh dấu lineage supersede (loại bản cũ khỏi cache).
+      // BUG-12: tìm bản completed gần nhất theo khóa (KHÔNG lọc cache-eligible) để không mất
+      // lineage khi bản trước lỗi-toàn-phần (đúng case hay rerun nhất).
+      if (parsed.fresh) {
+        const prev = await reviewJobRepository.findLatestCompletedByKey(key, enq.job.id);
+        if (prev) {
+          await reviewJobRepository.markSuperseded(prev.id, enq.job.id);
+          await reviewHistoryRepository.markSuperseded(prev.id, enq.job.id);
+          await auditRepository.append({
+            ts: new Date(), ownerId: project.ownerId, actor: ctx.userId,
+            action: 'review.rerun', projectId: project.id, prId: parsed.prId, commitHash,
+            meta: { supersedes: prev.id },
+          });
+        }
+      }
+      return { kind: 'queued', prId: parsed.prId, project: project.name };
+    }
+    if (enq.status === 'cap_reached') {
+      logger.warn('delivery_target_cap_reached', { projectId: project.id, prId: parsed.prId });
+      return { kind: 'cap_reached', prId: parsed.prId };
+    }
+    // CHỈ còn 'subscribed' | 'already_subscribed' → ack chờ, sẽ nhận fan-out khi xong.
+    logger.info('review_subscribed', { projectId: project.id, prId: parsed.prId, status: enq.status });
+    return { kind: 'subscribed', prId: parsed.prId, project: project.name };
   }
 }
 
